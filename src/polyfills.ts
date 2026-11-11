@@ -6,6 +6,9 @@
  * - TextEncoder / TextDecoder: the checkpoint serializer encodes state as UTF-8 bytes.
  * - crypto.getRandomValues / randomUUID: checkpoint and run ids are UUIDs.
  * - Symbol.asyncIterator: LangGraph streams are consumed with `for await`. Older Hermes lacks the symbol.
+ * - navigator.userAgent: React Native defines `navigator` without `userAgent`, and @langchain/core's
+ *   environment check calls navigator.userAgent.includes(...), which throws "Cannot read property
+ *   'includes' of undefined" on the first graph run.
  * - URL: React Native's built-in URL throws on most getters; @langchain/core's JSON-schema code
  *   builds a URL at load time and reads its fields later. This installs a spec-compliant one.
  */
@@ -15,6 +18,15 @@ import { ReadableStream, TransformStream, WritableStream } from 'web-streams-pol
 import { utf8Decode, utf8Encode } from './core/encoding';
 
 const g = globalThis as Record<string, unknown>;
+
+const nav = g.navigator as Record<string, unknown> | undefined;
+if (nav && typeof nav.userAgent !== 'string') {
+  try {
+    nav.userAgent = 'ReactNative';
+  } catch {
+    Object.defineProperty(nav, 'userAgent', { value: 'ReactNative', configurable: true });
+  }
+}
 
 if (typeof Symbol.asyncIterator === 'undefined') {
   // Must exist before LangGraph's classes are defined, so they get the right method key.

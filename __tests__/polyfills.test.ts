@@ -33,3 +33,26 @@ describe('encoding helpers', () => {
     }
   });
 });
+
+describe('navigator.userAgent', () => {
+  it("gives React Native's navigator a userAgent so LangChain's environment check does not throw", () => {
+    const g = globalThis as Record<string, unknown>;
+    const saved = { nav: g.navigator, win: g.window };
+    // What React Native provides: a window global and a navigator without userAgent.
+    g.window = g;
+    g.navigator = { product: 'ReactNative' };
+    try {
+      jest.isolateModules(() => {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const env = require('@langchain/core/utils/env');
+        expect(() => env.isJsDom()).toThrow(/includes/);
+        require('../src/polyfills');
+        expect((g.navigator as { userAgent?: string }).userAgent).toBe('ReactNative');
+        expect(env.isJsDom()).toBe(false);
+      });
+    } finally {
+      g.navigator = saved.nav;
+      g.window = saved.win;
+    }
+  });
+});
