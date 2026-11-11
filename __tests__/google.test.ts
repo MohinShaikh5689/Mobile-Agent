@@ -59,3 +59,14 @@ describe('chunker', () => {
     expect(chunks.join(' ')).toContain('Sentence number 199.');
   });
 });
+
+describe('oauth ids', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { reversedClientId, iosRedirectUri } = require('../src/google/oauthIds');
+  it('reverses an iOS client id into its redirect scheme', () => {
+    expect(reversedClientId('123-abc.apps.googleusercontent.com')).toBe('com.googleusercontent.apps.123-abc');
+    expect(iosRedirectUri(' 123-abc.apps.googleusercontent.com ')).toBe('com.googleusercontent.apps.123-abc:/oauthredirect');
+    expect(reversedClientId('')).toBeUndefined();
+    expect(reversedClientId('not-a-client-id')).toBeUndefined();
+  });
+});

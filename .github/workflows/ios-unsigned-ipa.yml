@@ -53,6 +53,15 @@ jobs:
 
       - run: npm ci
 
+      - name: Check Google OAuth client ID
+        run: |
+          if [ -z "$EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID" ]; then
+            echo "::warning::EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID is not set as a repository variable. The IPA will build, but Google sign-in will be disabled in it."
+          else
+            echo "Google iOS client ID is set; its redirect scheme will be registered."
+          fi
+
+      # app.config.ts registers the reversed iOS client ID as a URL scheme here.
       - name: Generate the native iOS project
         run: npx expo prebuild --platform ios --no-install --clean
 

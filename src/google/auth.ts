@@ -5,6 +5,7 @@ import * as WebBrowser from 'expo-web-browser';
 import { useCallback, useEffect, useState } from 'react';
 import { Platform } from 'react-native';
 import { AuthError } from './http';
+import { iosRedirectUri } from './oauthIds';
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -92,6 +93,9 @@ export function useGoogleSignIn() {
     iosClientId: CLIENT_IDS.ios,
     androidClientId: CLIENT_IDS.android,
     webClientId: CLIENT_IDS.web,
+    // iOS: redirect on the reversed client ID scheme (registered by app.config.ts), which keeps
+    // working when a sideloading tool rewrites the bundle ID. Android keeps the package-name default.
+    ...(Platform.OS === 'ios' && iosRedirectUri(CLIENT_IDS.ios) ? { redirectUri: iosRedirectUri(CLIENT_IDS.ios) } : {}),
     scopes: SCOPES,
     // Ask for a refresh token so the user is not signed out every hour.
     extraParams: { access_type: 'offline', prompt: 'consent' },

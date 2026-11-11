@@ -69,16 +69,27 @@ Python LangGraph cannot ship inside an Android or iOS app; it would need a separ
 
 ### 2. Google OAuth
 
-In the [Google Cloud Console](https://console.cloud.google.com/):
+The app needs Google OAuth **client IDs**: no API key and no client secret. Phone apps sign in with PKCE, so nothing secret ships in the app. Each user signs in with their own Google account, and the app only ever sees that user's data.
 
-1. Enable the **Gmail API**, **Google Drive API** and **Google Calendar API**.
-2. On the OAuth consent screen, add yourself as a test user. Add the scopes `gmail.readonly`, `drive.readonly` and `calendar.readonly`.
-3. Create OAuth client IDs:
-   - **iOS**, bundle ID `com.mobileagent.app`.
-   - **Android**, package `com.mobileagent.app`, plus the SHA-1 of your debug keystore (`cd android && ./gradlew signingReport` after the first prebuild).
-4. Copy `.env.example` to `.env` and fill in the IDs.
-5. Register the redirect schemes Google uses. In `app.json`, change `"scheme"` to an array that includes the reversed iOS client ID:
-   `["mobileagent", "com.googleusercontent.apps.<your-ios-client-id-prefix>"]`.
+In the [Google Cloud Console](https://console.cloud.google.com/), in one project:
+
+1. **Enable the APIs:** Gmail API, Google Drive API, Google Calendar API.
+2. **OAuth consent screen:** choose *External*, leave it in **Testing**, and add every Google account that will sign in as a **test user**. Add the scopes `gmail.readonly`, `drive.readonly` and `calendar.readonly`.
+3. **Create the client IDs** (Credentials → Create credentials → OAuth client ID):
+   - **iOS:** bundle ID `com.mobileagent.app`. This is the one the IPA needs.
+   - **Android:** package `com.mobileagent.app`, plus the SHA-1 of the signing key (`cd android && ./gradlew signingReport` after a prebuild).
+4. **Give the IDs to the build:**
+   - Locally: copy `.env.example` to `.env` and fill them in.
+   - In GitHub Actions: add them as repository **variables** (not secrets) named `EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID` and `EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID`.
+
+The iOS redirect scheme is set up for you: `app.config.ts` derives `com.googleusercontent.apps.<id>` from the iOS client ID and registers it, and the app redirects there. That redirect does not depend on the bundle ID, so it keeps working after a sideloading tool re-signs the app.
+
+**Limits of Testing mode:**
+- Only listed test users can sign in, up to 100.
+- Google shows an "unverified app" warning; tap *Continue*.
+- Refresh tokens expire after **7 days**, so you sign in again weekly.
+
+Removing those limits means publishing the app. `gmail.readonly` is a restricted scope, which then requires Google's verification and a security assessment. For personal use, Testing mode is enough.
 
 Scopes are read-only. They widen only when write actions are built.
 
@@ -113,7 +124,7 @@ The **iOS unsigned IPA** workflow (`.github/workflows/ios-unsigned-ipa.yml`) bui
 
 - **Before the first run:** set the Google client IDs as repository variables (Settings → Secrets and variables → Actions → Variables): `EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID`, plus the Android and web ones if you use them. They are compiled into the app.
 - **Entitlements:** the app is ad-hoc signed with its entitlements (no certificate), because sideloading tools re-sign with whatever entitlements the binary carries. Whether iOS honours `increased-memory-limit` then depends on the Apple ID that signs it. If your signing tool or account drops it, large models may be killed for using too much memory. Check the tool's log for the entitlement.
-- **Bundle ID:** a free Apple ID usually rewrites the bundle ID when signing. Google sign-in then needs an iOS OAuth client for the rewritten bundle ID.
+- **Bundle ID:** a free Apple ID usually rewrites the bundle ID when signing. Google sign-in still returns to the app, because it uses the reversed client ID scheme, not the bundle ID.
 - **Build time:** the build compiles llama.cpp and takes roughly 30–60 minutes on a GitHub macOS runner.
 
 ## Development
