@@ -1,0 +1,140 @@
+name: iOS unsigned IPA
+
+# Builds an IPA without an Apple certificate, for sideloading (AltStore, SideStore, Sideloadly, ...).
+# The sideloading tool signs it with your Apple ID when it installs.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: ios-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test -- --ci
+
+  ipa:
+    name: Build unsigned IPA
+    needs: check
+    runs-on: macos-latest
+    # llama.rn compiles llama.cpp from source, which is the slow part.
+    timeout-minutes: 90
+    env:
+      # Google OAuth client IDs are compiled into the JS bundle. Set them as repository variables
+      # (Settings → Secrets and variables → Actions → Variables).
+      EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID: ${{ vars.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID }}
+      EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID: ${{ vars.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID }}
+      EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID: ${{ vars.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Generate the native iOS project
+        run: npx expo prebuild --platform ios --no-install --clean
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: |
+            ios/Pods
+            ~/Library/Caches/CocoaPods
+          key: pods-${{ runner.os }}-${{ hashFiles('package-lock.json', 'app.json') }}
+          restore-keys: pods-${{ runner.os }}-
+
+      - name: Install pods
+        working-directory: ios
+        run: pod install
+
+      - name: Find workspace and scheme
+        id: project
+        run: |
+          WORKSPACE=$(ls -d ios/*.xcworkspace | head -n 1)
+          SCHEME=$(basename "$WORKSPACE" .xcworkspace)
+          ENTITLEMENTS=$(ls "ios/$SCHEME"/*.entitlements | head -n 1)
+          echo "workspace=$WORKSPACE" >> "$GITHUB_OUTPUT"
+          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
+          echo "entitlements=$ENTITLEMENTS" >> "$GITHUB_OUTPUT"
+          echo "Workspace: $WORKSPACE, scheme: $SCHEME, entitlements: $ENTITLEMENTS"
+          cat "$ENTITLEMENTS"
+
+      - name: Archive without code signing
+        run: |
+          mkdir -p build
+          xcodebuild archive \
+            -workspace "${{ steps.project.outputs.workspace }}" \
+            -scheme "${{ steps.project.outputs.scheme }}" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/App.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            > build/xcodebuild.log 2>&1 || {
+              tail -n 150 build/xcodebuild.log
+              echo "::error::xcodebuild failed; the full log is in the build-log artifact"
+              exit 1
+            }
+          echo "Archive built."
+
+      - name: Package IPA
+        id: package
+        run: |
+          APP=$(ls -d build/App.xcarchive/Products/Applications/*.app | head -n 1)
+          rm -rf build/Payload && mkdir -p build/Payload
+          cp -R "$APP" build/Payload/
+          APP="build/Payload/$(basename "$APP")"
+
+          # Ad-hoc sign (no certificate) so the entitlements travel inside the binary. Sideloading
+          # tools re-sign with the entitlements they find there; a binary with none would lose the
+          # increased-memory-limit entitlement the 4B model needs.
+          find "$APP/Frameworks" -maxdepth 1 \( -name '*.framework' -o -name '*.dylib' \) -print0 2>/dev/null \
+            | xargs -0 -I{} codesign --force --sign - --timestamp=none {}
+          codesign --force --sign - --timestamp=none \
+            --entitlements "${{ steps.project.outputs.entitlements }}" "$APP"
+          echo "Embedded entitlements:"
+          codesign -d --entitlements - "$APP"
+
+          VERSION=$(node -p "require('./app.json').expo.version")
+          NAME="MobileAgent-${VERSION}-${GITHUB_SHA::7}-unsigned.ipa"
+          (cd build && zip -qry "$NAME" Payload)
+          echo "ipa=build/$NAME" >> "$GITHUB_OUTPUT"
+          ls -lh "build/$NAME"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned-ipa
+          path: ${{ steps.package.outputs.ipa }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log
+          path: build/xcodebuild.log
+          if-no-files-found: ignore

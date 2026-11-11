@@ -107,6 +107,15 @@ Once the app is running:
 3. Tap **Sync now** to build the local index. Embedding runs on the phone, so keep it plugged in for the first sync.
 4. Ask questions on the **Chat** tab.
 
+### Unsigned IPA for sideloading (iOS)
+
+The **iOS unsigned IPA** workflow (`.github/workflows/ios-unsigned-ipa.yml`) builds an IPA without an Apple certificate. Run it from the Actions tab, or push a `v*` tag. It runs the tests, builds on a macOS runner, and uploads `MobileAgent-<version>-<sha>-unsigned.ipa` as an artifact. Install it with a sideloading tool such as AltStore, SideStore or Sideloadly, which signs it with your Apple ID.
+
+- **Before the first run:** set the Google client IDs as repository variables (Settings → Secrets and variables → Actions → Variables): `EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID`, plus the Android and web ones if you use them. They are compiled into the app.
+- **Entitlements:** the app is ad-hoc signed with its entitlements (no certificate), because sideloading tools re-sign with whatever entitlements the binary carries. Whether iOS honours `increased-memory-limit` then depends on the Apple ID that signs it. If your signing tool or account drops it, large models may be killed for using too much memory. Check the tool's log for the entitlement.
+- **Bundle ID:** a free Apple ID usually rewrites the bundle ID when signing. Google sign-in then needs an iOS OAuth client for the rewritten bundle ID.
+- **Build time:** the build compiles llama.cpp and takes roughly 30–60 minutes on a GitHub macOS runner.
+
 ## Development
 
 ```bash
