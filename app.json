@@ -9,11 +9,9 @@
     "ios": {
       "bundleIdentifier": "com.mobileagent.app",
       "supportsTablet": true,
-      "infoPlist": {
-        "NSAppTransportSecurity": {
-          "NSAllowsLocalNetworking": true
-        },
-        "NSLocalNetworkUsageDescription": "Connects to the model server on your laptop."
+      "entitlements": {
+        "com.apple.developer.kernel.increased-memory-limit": true,
+        "com.apple.developer.kernel.extended-virtual-addressing": true
       }
     },
     "android": {
@@ -24,11 +22,11 @@
       "expo-secure-store",
       "expo-web-browser",
       [
-        "expo-build-properties",
+        "llama.rn",
         {
-          "android": {
-            "usesCleartextTraffic": true
-          }
+          "enableEntitlements": false,
+          "forceCxx20": true,
+          "enableOpenCLAndHexagon": true
         }
       ]
     ]

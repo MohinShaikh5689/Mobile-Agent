@@ -2,7 +2,7 @@
 
 A local-first personal agent for Android and iOS that answers questions across Gmail, Google Drive and Google Calendar. Built with React Native (Expo) and TypeScript.
 
-The agent runs **inside the app** as a [LangGraph.js](https://github.com/langchain-ai/langgraphjs) graph. There is no Python and no Node server. The only thing outside the phone is the model, served by Ollama on your laptop.
+Everything runs **on the phone**. The agent is a [LangGraph.js](https://github.com/langchain-ai/langgraphjs) graph inside the app, and the model runs locally through [llama.rn](https://github.com/mybigday/llama.rn) (llama.cpp). There is no server, no Python and no laptop. The only network traffic is to Google's APIs and the one-time model download.
 
 What is built:
 - **LangGraph graph:** router, specialists, a grader with one query rewrite, and a planner. It is checkpointed to on-device SQLite at every step.
@@ -33,7 +33,9 @@ retrieve:  local index [floor, watermark)  +  live API before floor and since wa
 | `src/core/` | Framework-free agent logic: router, time windows, watermark plan, retriever, tool loop, specialists. Unit-tested. |
 | `src/core/watermark.ts` | The watermark rule. The index covers `[floor, watermark)`; anything outside is fetched live. |
 | `src/core/retriever.ts` | Hybrid retrieval, merge and rerank, and the weak-result live fallback. |
-| `src/core/llm/` | Model interface plus the Ollama backend (chat, schema-constrained JSON, embeddings). An on-device backend can implement the same interface. |
+| `src/core/llm/onDevice.ts` | The on-device model: tool calls through the model's own chat template, grammar-constrained JSON for the grader and planner, embeddings, one call at a time per context. |
+| `src/core/llm/models.ts` | The model list: Qwen3-4B-Instruct-2507 (default) and Phi-4-mini for chat, nomic-embed-text v1.5 for embeddings. |
+| `src/llm/` | Model downloads (to a `.part` file, renamed when complete) and the single shared runtime. Model memory is freed when the app goes to the background. |
 | `src/google/` | Gmail, Drive and Calendar clients, OAuth, and incremental sync. |
 | `src/storage/` | SQLite vector index and key-value store on the device. |
 | `src/ui/` | Chat and Settings screens. Each answer shows its graph path, plan, retrieval windows, tool calls and sources. |
@@ -54,21 +56,16 @@ Python LangGraph cannot ship inside an Android or iOS app; it would need a separ
 
 ## Running it
 
-### 1. Model server on the laptop (Ollama)
+### 1. Device and memory
 
-```bash
-ollama pull qwen3:4b-instruct
-```
+| Platform | What it needs |
+| --- | --- |
+| iOS | A device with an Apple7 GPU or newer (A14 / iPhone 12 and later) for Metal. 8 GB RAM is recommended for the 4B models. The app requests the **Increased Memory Limit** and **Extended Virtual Addressing** entitlements (see below). Metal does not work in the simulator, so test on a device. |
+| Android | arm64 with 8 GB RAM or more for the 4B models. Runs on the CPU, plus the GPU through OpenCL on Qualcomm Adreno chips. |
 
-```bash
-ollama pull nomic-embed-text
-```
+**iOS entitlements.** `app.json` declares `com.apple.developer.kernel.increased-memory-limit` and `com.apple.developer.kernel.extended-virtual-addressing` for every build, not only production. Enable both capabilities on the App ID (`com.mobileagent.app`) in the Apple Developer portal. EAS Build syncs capabilities automatically; with local Xcode builds, enable them under Signing & Capabilities.
 
-```bash
-OLLAMA_HOST=0.0.0.0 ollama serve
-```
-
-The phone and the laptop must be on the same Wi-Fi network. In the app, open **Settings** and set the Ollama URL to `http://<laptop-LAN-IP>:11434`, then tap **Test connection**. You can change the chat and embedding models there, for example to compare the four candidates in the project doc.
+**Models.** On first launch, open **Settings → On-device models** and download one chat model (about 2.5 GB) and the embedding model (about 150 MB), preferably over Wi-Fi. Files go to the app's Documents folder. If a link has moved, use **Edit URL** on that model.
 
 ### 2. Google OAuth
 
@@ -105,9 +102,10 @@ npx expo run:ios
 
 Once the app is running:
 
-1. Sign in on the **Settings** tab.
-2. Tap **Sync now** to build the local index.
-3. Ask questions on the **Chat** tab.
+1. Download the models on the **Settings** tab.
+2. Sign in to Google on the **Settings** tab.
+3. Tap **Sync now** to build the local index. Embedding runs on the phone, so keep it plugged in for the first sync.
+4. Ask questions on the **Chat** tab.
 
 ## Development
 
@@ -137,4 +135,4 @@ The core and the graph are tested with fakes: a bag-of-words embedder, a scripte
 | 3 | The eval set (at least 30 tasks, including injection cases) with route accuracy. The graph itself is built. |
 | 4 | Write actions: drafts and event changes behind an approval gate (an `interruptBefore` breakpoint) that shows exactly what will happen. Re-fetch by ID before acting. |
 | 5 | An MCP server per service, tracing, and a four-model comparison. |
-| Phone | An on-device model (for example llama.rn with a 3–4B Q4 GGUF) behind the same `ChatModel` and `Embedder` interfaces, so the laptop is no longer needed. |
+| Phone | Measured memory and speed on target devices, and a 1.7B fallback for phones with less RAM. |

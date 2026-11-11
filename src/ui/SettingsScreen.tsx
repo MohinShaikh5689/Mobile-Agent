@@ -1,13 +1,18 @@
-import { useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
+import { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import type { AppContainer } from '../appContainer';
 import { kv, vectorIndex } from '../appContainer';
 import { isoDate } from '../core/specialists';
 import type { Source } from '../core/types';
 import type { Coverage } from '../core/watermark';
+import type { ModelSpec } from '../core/llm/models';
+import { formatBytes, MODELS } from '../core/llm/models';
 import { clientIdsConfigured, useGoogleSignIn } from '../google/auth';
 import type { SyncProgress } from '../google/sync';
 import { loadCoverage } from '../google/sync';
+import type { DownloadHandle } from '../llm/modelStore';
+import { deleteModel, downloadModel, isDownloaded } from '../llm/modelStore';
 import type { Settings } from '../storage/settings';
 import type { Theme } from './theme';
 import { useTheme } from './theme';
@@ -57,6 +62,116 @@ function Field({ label, value, onChange, t, hint }: {
   );
 }
 
+/** Download, delete and choose the models that run on the phone. */
+function ModelsCard({ settings, onSave, onModelsChanged, t }: {
+  settings: Settings;
+  onSave: (s: Settings) => void;
+  onModelsChanged: () => void;
+  t: Theme;
+}) {
+  const [progress, setProgress] = useState<Record<string, number>>({});
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [downloaded, setDownloaded] = useState<Record<string, boolean>>({});
+  const [editingUrl, setEditingUrl] = useState<string | null>(null);
+  const handles = useRef<Record<string, DownloadHandle>>({});
+
+  const refresh = () => setDownloaded(Object.fromEntries(MODELS.map((m) => [m.id, isDownloaded(m)])));
+  useEffect(refresh, []);
+
+  const urlFor = (m: ModelSpec) => settings.modelUrls[m.id] ?? m.url;
+
+  const start = (m: ModelSpec) => {
+    setErrors((e) => ({ ...e, [m.id]: '' }));
+    setProgress((p) => ({ ...p, [m.id]: 0 }));
+    const h = downloadModel(m, urlFor(m), (f) => setProgress((p) => ({ ...p, [m.id]: f })));
+    handles.current[m.id] = h;
+    h.done
+      .then(() => {
+        refresh();
+        onModelsChanged();
+      })
+      .catch((e: Error) => setErrors((x) => ({ ...x, [m.id]: e.message })))
+      .finally(() => {
+        delete handles.current[m.id];
+        setProgress((p) => {
+          const { [m.id]: _, ...rest } = p;
+          return rest;
+        });
+      });
+  };
+
+  const remove = (m: ModelSpec) =>
+    Alert.alert(`Delete ${m.name}?`, `Frees ${formatBytes(m.sizeBytes)}. You can download it again later.`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: () => {
+          deleteModel(m);
+          refresh();
+          onModelsChanged();
+        },
+      },
+    ]);
+
+  const select = (m: ModelSpec) =>
+    onSave(m.role === 'chat' ? { ...settings, chatModel: m.id } : { ...settings, embedModel: m.id });
+
+  return (
+    <View style={[styles.card, { backgroundColor: t.surface, borderColor: t.border }]}>
+      <Text style={[styles.h, { color: t.text }]}>On-device models</Text>
+      <Text style={{ color: t.muted }}>
+        The agent runs entirely on this phone. Download one chat model and the embedding model, over Wi-Fi.
+      </Text>
+      {MODELS.map((m) => {
+        const selected = m.role === 'chat' ? settings.chatModel === m.id : settings.embedModel === m.id;
+        const p = progress[m.id];
+        return (
+          <View key={m.id} style={[styles.model, { borderColor: selected ? t.accent : t.border }]}>
+            <Pressable onPress={() => select(m)} hitSlop={6}>
+              <Text style={{ color: t.text, fontWeight: '600' }}>
+                {selected ? '● ' : '○ '}
+                {m.name}
+              </Text>
+              <Text style={{ color: t.muted, fontSize: 12 }}>
+                {m.role === 'chat' ? 'Chat' : 'Embeddings'} · {formatBytes(m.sizeBytes)} · {m.notes}
+              </Text>
+            </Pressable>
+            <View style={[styles.row, { alignItems: 'center' }]}>
+              {p !== undefined ? (
+                <>
+                  <Text style={{ color: t.muted }}>Downloading {Math.round(p * 100)}%</Text>
+                  <Button label="Cancel" onPress={() => handles.current[m.id]?.cancel()} t={t} kind="secondary" />
+                </>
+              ) : downloaded[m.id] ? (
+                <>
+                  <Text style={{ color: t.accent }}>Downloaded</Text>
+                  <Button label="Delete" onPress={() => remove(m)} t={t} kind="secondary" />
+                </>
+              ) : (
+                <>
+                  <Button label="Download" onPress={() => start(m)} t={t} />
+                  <Button label="Edit URL" onPress={() => setEditingUrl(editingUrl === m.id ? null : m.id)} t={t} kind="secondary" />
+                </>
+              )}
+            </View>
+            {editingUrl === m.id && (
+              <Field
+                label="Download URL"
+                value={urlFor(m)}
+                onChange={(v) => onSave({ ...settings, modelUrls: { ...settings.modelUrls, [m.id]: v } })}
+                t={t}
+                hint="A direct link to the .gguf file."
+              />
+            )}
+            {errors[m.id] ? <Text style={{ color: t.error }}>{errors[m.id]}</Text> : null}
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
 function coverageText(c: Coverage | undefined): string {
   if (!c) return 'not synced';
   const floor = c.floor !== undefined ? isoDate(c.floor) : 'start';
@@ -64,15 +179,15 @@ function coverageText(c: Coverage | undefined): string {
   return `${floor} → ${isoDate(c.watermark)} ${wm.toTimeString().slice(0, 5)}`;
 }
 
-export function SettingsScreen({ settings, onSave, container }: {
+export function SettingsScreen({ settings, onSave, container, onModelsChanged }: {
   settings: Settings;
   onSave: (s: Settings) => void;
   container: AppContainer | null;
+  /** A model was downloaded or deleted: rebuild the agent. */
+  onModelsChanged: () => void;
 }) {
   const t = useTheme();
   const google = useGoogleSignIn();
-  const [draft, setDraft] = useState(settings);
-  const [modelStatus, setModelStatus] = useState<string | null>(null);
   const [sync, setSync] = useState<SyncProgress | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [coverage, setCoverage] = useState<Partial<Record<Source, Coverage>>>({});
@@ -87,36 +202,17 @@ export function SettingsScreen({ settings, onSave, container }: {
     refreshIndexInfo();
   }, []);
 
-  useEffect(() => setDraft(settings), [settings]);
-
-  const dirty = JSON.stringify(draft) !== JSON.stringify(settings);
-
-  const testModel = async () => {
-    if (!container) return;
-    setModelStatus('Checking…');
-    try {
-      const models = await container.model.listModels();
-      const missing = [settings.chatModel, settings.embedModel].filter(
-        (m) => !models.some((x) => x === m || x.startsWith(`${m}:`)),
-      );
-      setModelStatus(
-        missing.length
-          ? `Connected, but missing: ${missing.join(', ')}. Run "ollama pull <name>" on the laptop.`
-          : `Connected. ${models.length} models available.`,
-      );
-    } catch (e) {
-      setModelStatus((e as Error).message);
-    }
-  };
-
   const runSync = async () => {
     if (!container) return;
     setSyncing(true);
+    // Embedding runs on the phone and takes a while: keep the screen on so the OS doesn't suspend it.
+    await activateKeepAwakeAsync('index-sync');
     try {
       await container.indexer.syncAll(setSync);
     } catch (e) {
       setSync({ source: 'mail', phase: 'error', done: 0, total: 0, message: (e as Error).message });
     } finally {
+      deactivateKeepAwake('index-sync');
       setSyncing(false);
       refreshIndexInfo();
     }
@@ -131,26 +227,7 @@ export function SettingsScreen({ settings, onSave, container }: {
 
   return (
     <ScrollView contentContainerStyle={{ padding: 16, gap: 24 }}>
-      <View style={[styles.card, { backgroundColor: t.surface, borderColor: t.border }]}>
-        <Text style={[styles.h, { color: t.text }]}>Model server</Text>
-        <Text style={{ color: t.muted }}>
-          Phase 1 runs the model on your laptop with Ollama. The phone talks to it over Wi-Fi.
-        </Text>
-        <Field
-          label="Ollama URL"
-          value={draft.ollamaUrl}
-          onChange={(v) => setDraft({ ...draft, ollamaUrl: v })}
-          t={t}
-          hint="Your laptop's LAN address. Start Ollama with OLLAMA_HOST=0.0.0.0."
-        />
-        <Field label="Chat model" value={draft.chatModel} onChange={(v) => setDraft({ ...draft, chatModel: v })} t={t} />
-        <Field label="Embedding model" value={draft.embedModel} onChange={(v) => setDraft({ ...draft, embedModel: v })} t={t} />
-        <View style={styles.row}>
-          <Button label="Save" onPress={() => onSave(draft)} t={t} disabled={!dirty} />
-          <Button label="Test connection" onPress={testModel} t={t} kind="secondary" disabled={dirty} />
-        </View>
-        {modelStatus && <Text style={{ color: t.muted }}>{modelStatus}</Text>}
-      </View>
+      <ModelsCard settings={settings} onSave={onSave} onModelsChanged={onModelsChanged} t={t} />
 
       <View style={[styles.card, { backgroundColor: t.surface, borderColor: t.border }]}>
         <Text style={[styles.h, { color: t.text }]}>Google account</Text>
@@ -175,6 +252,7 @@ export function SettingsScreen({ settings, onSave, container }: {
         <Text style={[styles.h, { color: t.text }]}>Local index</Text>
         <Text style={{ color: t.muted }}>
           Older mail and Drive docs are embedded on the phone. Anything newer than the watermark is fetched live.
+          The first sync can take a while: keep the phone plugged in and the app open.
         </Text>
         <Text style={{ color: t.text }}>Mail: {coverageText(coverage.mail)}</Text>
         <Text style={{ color: t.text }}>Docs: {coverageText(coverage.docs)}</Text>
@@ -204,4 +282,5 @@ const styles = StyleSheet.create({
   input: { borderWidth: 1, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 8, fontSize: 15 },
   row: { flexDirection: 'row', gap: 10, flexWrap: 'wrap' },
   button: { borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10 },
+  model: { borderWidth: 1, borderRadius: 10, padding: 12, gap: 8 },
 });

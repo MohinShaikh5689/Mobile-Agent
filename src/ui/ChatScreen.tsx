@@ -118,7 +118,13 @@ function Details({ result, t }: { result: AgentAnswer; t: Theme }) {
   );
 }
 
-export function ChatScreen({ agent }: { agent: Agent | null }) {
+export function ChatScreen({ agent, unavailable, loadStatus }: {
+  agent: Agent | null;
+  /** Why the agent cannot run yet (models missing), shown instead of the examples. */
+  unavailable: string;
+  /** Model loading progress, shown while the weights load. */
+  loadStatus: string | null;
+}) {
   const t = useTheme();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -167,7 +173,7 @@ export function ChatScreen({ agent }: { agent: Agent | null }) {
           <View style={{ flex: 1, justifyContent: 'center', gap: 10 }}>
             <Text style={{ color: t.text, fontSize: 20, fontWeight: '600' }}>Ask about your mail, docs and calendar</Text>
             <Text style={{ color: t.muted }}>
-              {agent ? 'Read-only for now. Try one of these:' : 'Set up the model server and Google sign-in in Settings first.'}
+              {agent ? 'Runs on this phone. Read-only for now. Try one of these:' : unavailable}
             </Text>
             {agent &&
               EXAMPLES.map((ex) => (
@@ -200,7 +206,7 @@ export function ChatScreen({ agent }: { agent: Agent | null }) {
       {busy && (
         <View style={styles.status}>
           <ActivityIndicator color={t.accent} size="small" />
-          <Text style={{ color: t.muted }}>{status || 'Thinking…'}</Text>
+          <Text style={{ color: t.muted }}>{loadStatus || status || 'Thinking…'}</Text>
         </View>
       )}
       <View style={[styles.inputRow, { borderTopColor: t.border, backgroundColor: t.surface }]}>

@@ -1,4 +1,4 @@
-/** Model-backend interfaces. The app ships an Ollama backend; an on-device backend can implement the same two. */
+/** Model-backend interfaces. The app implements them with llama.rn, running the model on the phone. */
 
 export interface ToolCall {
   name: string;
@@ -39,8 +39,14 @@ export interface ChatModel {
   chatJson?(messages: ChatMessage[], schema: Record<string, unknown>): Promise<unknown>;
 }
 
+/**
+ * Retrieval embedders often embed queries and documents differently (nomic-embed uses
+ * "search_query: " / "search_document: " prefixes). Defaults to 'document'.
+ */
+export type EmbedKind = 'query' | 'document';
+
 export interface Embedder {
-  embed(texts: string[]): Promise<number[][]>;
+  embed(texts: string[], kind?: EmbedKind): Promise<number[][]>;
 }
 
 /** Small models often emit <think> blocks; they are never part of the answer. */

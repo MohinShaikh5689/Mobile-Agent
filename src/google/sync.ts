@@ -100,7 +100,7 @@ export class Indexer {
     }
     for (let i = 0; i < pending.length; i += EMBED_BATCH) {
       const batch = pending.slice(i, i + EMBED_BATCH);
-      const vecs = await this.deps.embedder.embed(batch.map((c) => c.text));
+      const vecs = await this.deps.embedder.embed(batch.map((c) => c.text), 'document');
       await this.deps.index.upsert(batch.map((c, j) => ({ ...c, embedding: vecs[j] ?? [] })));
     }
   }

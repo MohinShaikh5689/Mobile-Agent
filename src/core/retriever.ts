@@ -57,7 +57,7 @@ export class HybridRetriever {
   }
 
   async retrieve(req: RetrievalRequest): Promise<RetrievalResult> {
-    const [queryVec] = await this.deps.embedder.embed([req.question]);
+    const [queryVec] = await this.deps.embedder.embed([req.question], 'query');
     if (!queryVec) throw new Error('Embedder returned no vector for the question.');
     const coverage = await this.deps.coverage();
 
@@ -139,7 +139,7 @@ export class HybridRetriever {
 
   private async scoreLive(items: Item[], queryVec: number[]): Promise<ScoredItem[]> {
     if (items.length === 0) return [];
-    const vecs = await this.deps.embedder.embed(items.map((it) => `${it.title}\n${it.text}`));
+    const vecs = await this.deps.embedder.embed(items.map((it) => `${it.title}\n${it.text}`), 'document');
     return items.map((it, i) => ({ ...it, score: cosine(queryVec, vecs[i] ?? []), origin: 'live' as const }));
   }
 }

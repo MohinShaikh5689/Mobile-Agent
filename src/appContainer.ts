@@ -1,5 +1,5 @@
 import { DurableCheckpointSaver } from './core/graph/checkpointer';
-import { OllamaChatModel } from './core/llm/ollama';
+import type { OnDeviceModel } from './core/llm/onDevice';
 import { Agent } from './core/orchestrator';
 import { HybridRetriever } from './core/retriever';
 import type { Services } from './core/services';
@@ -8,6 +8,7 @@ import { CalendarClient } from './google/calendar';
 import { DriveClient } from './google/drive';
 import { GmailClient } from './google/gmail';
 import { Indexer, loadCoverage } from './google/sync';
+import { getRuntime } from './llm/runtime';
 import type { Settings } from './storage/settings';
 import { SqliteKeyValueStore, SqliteVectorIndex } from './storage/sqlite';
 
@@ -19,16 +20,17 @@ export const checkpointer = new DurableCheckpointSaver(kv);
 export interface AppContainer {
   agent: Agent;
   indexer: Indexer;
-  model: OllamaChatModel;
+  model: OnDeviceModel;
 }
 
-/** Builds the agent graph from the current settings. Rebuilt whenever settings change. */
-export function buildContainer(settings: Settings): AppContainer {
-  const model = new OllamaChatModel({
-    baseUrl: settings.ollamaUrl,
-    chatModel: settings.chatModel,
-    embedModel: settings.embedModel,
-  });
+export type ContainerResult = { ok: true; container: AppContainer } | { ok: false; reason: string };
+
+/** Builds the agent graph around the on-device model. Rebuilt whenever settings change. */
+export async function buildContainer(settings: Settings): Promise<ContainerResult> {
+  const runtime = await getRuntime(settings.chatModel, settings.embedModel);
+  if (!runtime.ok) return { ok: false, reason: runtime.reason };
+  const model = runtime.model;
+
   const gmail = new GmailClient(getAccessToken);
   const drive = new DriveClient(getAccessToken);
   const calendar = new CalendarClient(getAccessToken);
@@ -45,16 +47,19 @@ export function buildContainer(settings: Settings): AppContainer {
   });
 
   return {
-    agent: new Agent({
+    ok: true,
+    container: {
+      agent: new Agent({
+        model,
+        retriever,
+        services,
+        loadCoverage: () => loadCoverage(kv),
+        checkpointer,
+        kv,
+        maxSteps: settings.maxSteps,
+      }),
+      indexer: new Indexer({ gmail, drive, index: vectorIndex, embedder: model, kv }),
       model,
-      retriever,
-      services,
-      loadCoverage: () => loadCoverage(kv),
-      checkpointer,
-      kv,
-      maxSteps: settings.maxSteps,
-    }),
-    indexer: new Indexer({ gmail, drive, index: vectorIndex, embedder: model, kv }),
-    model,
+    },
   };
 }

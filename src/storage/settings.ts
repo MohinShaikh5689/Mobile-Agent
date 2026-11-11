@@ -1,17 +1,19 @@
+import { DEFAULT_CHAT_MODEL, DEFAULT_EMBED_MODEL, findModel } from '../core/llm/models';
 import type { KeyValueStore } from '../core/services';
 
 export interface Settings {
-  /** Ollama on the laptop, reachable over Wi-Fi. Run it with OLLAMA_HOST=0.0.0.0. */
-  ollamaUrl: string;
+  /** Model ids from src/core/llm/models.ts. Both run on the phone. */
   chatModel: string;
   embedModel: string;
+  /** Per-model download URL overrides, in case a file moves. */
+  modelUrls: Record<string, string>;
   maxSteps: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  ollamaUrl: 'http://192.168.1.10:11434',
-  chatModel: 'qwen3:4b-instruct',
-  embedModel: 'nomic-embed-text',
+  chatModel: DEFAULT_CHAT_MODEL,
+  embedModel: DEFAULT_EMBED_MODEL,
+  modelUrls: {},
   maxSteps: 5,
 };
 
@@ -21,7 +23,14 @@ export async function loadSettings(kv: KeyValueStore): Promise<Settings> {
   const raw = await kv.get(KEY);
   if (!raw) return DEFAULT_SETTINGS;
   try {
-    return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<Settings>) };
+    const parsed = JSON.parse(raw) as Partial<Settings>;
+    // Ids not in the catalog (such as Ollama names saved by older builds) fall back to the defaults.
+    return {
+      chatModel: findModel(parsed.chatModel ?? '')?.role === 'chat' ? (parsed.chatModel as string) : DEFAULT_SETTINGS.chatModel,
+      embedModel: findModel(parsed.embedModel ?? '')?.role === 'embed' ? (parsed.embedModel as string) : DEFAULT_SETTINGS.embedModel,
+      modelUrls: parsed.modelUrls ?? {},
+      maxSteps: parsed.maxSteps ?? DEFAULT_SETTINGS.maxSteps,
+    };
   } catch {
     return DEFAULT_SETTINGS;
   }
