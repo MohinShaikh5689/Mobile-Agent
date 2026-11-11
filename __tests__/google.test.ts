@@ -70,3 +70,17 @@ describe('oauth ids', () => {
     expect(reversedClientId('not-a-client-id')).toBeUndefined();
   });
 });
+
+describe('download errors', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  jest.mock('expo-file-system', () => ({}));
+  jest.mock('expo-keep-awake', () => ({}));
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { explainDownloadError } = require('../src/llm/modelStore');
+  const url = 'https://huggingface.co/a/b/resolve/main/x.gguf';
+  it('explains common failures', () => {
+    expect(explainDownloadError('server returned HTTP 404', url)).toMatch(/not found.*Edit URL/);
+    expect(explainDownloadError('response has status 401', url)).toMatch(/huggingface\.co refused.*gated/);
+    expect(explainDownloadError('The Internet connection appears to be offline.', url)).toMatch(/Could not reach huggingface\.co/);
+  });
+});

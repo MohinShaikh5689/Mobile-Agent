@@ -47,6 +47,20 @@ export interface DownloadHandle {
   cancel(): void;
 }
 
+/** Turns a native download error into something the user can act on. */
+export function explainDownloadError(message: string, url: string): string {
+  const host = url.replace(/^https?:\/\//, '').split('/')[0] ?? url;
+  const status = message.match(/HTTP (\d{3})|status (\d{3})/);
+  const code = status ? Number(status[1] ?? status[2]) : null;
+  if (code === 404) return `The file was not found at that link (HTTP 404). Use Edit URL to paste a working .gguf link.`;
+  if (code === 401 || code === 403) {
+    return `${host} refused the download (HTTP ${code}). The model may be gated: pick a different link with Edit URL.`;
+  }
+  if (code) return `${host} returned HTTP ${code}. Try again, or use Edit URL.`;
+  if (/offline|internet|network|timed out|host/i.test(message)) return `Could not reach ${host}: ${message}`;
+  return message;
+}
+
 export function downloadModel(spec: ModelSpec, url: string, onProgress: (fraction: number) => void): DownloadHandle {
   const free = Paths.availableDiskSpace;
   // Leave headroom for the index and the OS.
@@ -60,25 +74,33 @@ export function downloadModel(spec: ModelSpec, url: string, onProgress: (fractio
   const part = new File(modelsDir(), `${spec.fileName}.part`);
   if (part.exists) part.delete();
   const task = new DownloadTask(url, part, {
+    // Foreground: the app stays open with the screen awake while downloading. iOS background
+    // sessions can be deferred or throttled, which looks like a download that never starts.
+    sessionType: 'foreground',
     onProgress: ({ bytesWritten, totalBytes }) => {
       const total = totalBytes > 0 ? totalBytes : spec.sizeBytes;
-      onProgress(Math.min(1, bytesWritten / total));
+      if (total > 0) onProgress(Math.min(1, bytesWritten / total));
     },
   });
 
   const done = (async () => {
     await activateKeepAwakeAsync(KEEP_AWAKE_TAG);
     try {
-      const file = await task.downloadAsync();
+      let file: File | null;
+      try {
+        file = await task.downloadAsync();
+      } catch (e) {
+        throw new Error(explainDownloadError((e as Error).message ?? String(e), url));
+      }
       if (!file) throw new Error('Download was cancelled.');
       if ((file.size ?? 0) < 1024 * 1024) {
-        const head = file.exists ? (await file.text()).slice(0, 200) : '';
+        const head = file.exists ? (await file.text()).replace(/\s+/g, ' ').slice(0, 160) : '';
         file.delete();
-        throw new Error(`The server did not return a model file. ${head}`.trim());
+        throw new Error(`The link did not return a model file${head ? `: "${head}"` : ''}. Use Edit URL to fix it.`);
       }
       const target = modelFile(spec);
       if (target.exists) target.delete();
-      file.move(target);
+      await file.move(target);
       onProgress(1);
     } finally {
       deactivateKeepAwake(KEEP_AWAKE_TAG);

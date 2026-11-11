@@ -34,11 +34,11 @@ jobs:
     # llama.rn compiles llama.cpp from source, which is the slow part.
     timeout-minutes: 90
     env:
-      # Google OAuth client IDs are compiled into the JS bundle. Set them as repository variables
-      # (Settings → Secrets and variables → Actions → Variables).
-      EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID: ${{ vars.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID }}
-      EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID: ${{ vars.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID }}
-      EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID: ${{ vars.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID }}
+      # Google OAuth client IDs are compiled into the JS bundle. Set them as repository variables or
+      # secrets (Settings → Secrets and variables → Actions); either works.
+      EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID: ${{ vars.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID || secrets.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID }}
+      EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID: ${{ vars.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID || secrets.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID }}
+      EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID: ${{ vars.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID || secrets.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID }}
     steps:
       - uses: actions/checkout@v4
 
@@ -56,7 +56,7 @@ jobs:
       - name: Check Google OAuth client ID
         run: |
           if [ -z "$EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID" ]; then
-            echo "::warning::EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID is not set as a repository variable. The IPA will build, but Google sign-in will be disabled in it."
+            echo "::warning::EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID is not set as a repository variable or secret. The IPA will build, but Google sign-in will be disabled in it."
           else
             echo "Google iOS client ID is set; its redirect scheme will be registered."
           fi

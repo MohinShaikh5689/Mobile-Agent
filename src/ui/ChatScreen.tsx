@@ -161,7 +161,17 @@ export function ChatScreen({ agent, unavailable, loadStatus }: {
   const send = useCallback(
     async (text: string) => {
       const q = text.trim();
-      if (!q || busy || !agent) return;
+      if (!q || busy) return;
+      if (!agent) {
+        // Say why instead of silently ignoring the message.
+        setMessages((m) => [
+          ...m,
+          { id: `${Date.now()}u`, role: 'user', text: q },
+          { id: `${Date.now()}e`, role: 'error', text: unavailable || 'The assistant is still loading.' },
+        ]);
+        setInput('');
+        return;
+      }
       setInput('');
       setBusy(true);
       setMessages((m) => [...m, { id: `${Date.now()}u`, role: 'user', text: q }]);
@@ -180,7 +190,7 @@ export function ChatScreen({ agent, unavailable, loadStatus }: {
         setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
       }
     },
-    [agent, busy],
+    [agent, busy, unavailable],
   );
 
   return (
@@ -249,19 +259,20 @@ export function ChatScreen({ agent, unavailable, loadStatus }: {
         <TextInput
           value={input}
           onChangeText={setInput}
-          placeholder="Ask something…"
+          placeholder={agent ? 'Ask something…' : 'Ask something (download a model in Settings first)'}
           placeholderTextColor={t.muted}
           style={[styles.input, { color: t.text, backgroundColor: t.bg, borderColor: t.border }]}
           onSubmitEditing={() => send(input)}
           returnKeyType="send"
-          editable={!busy && Boolean(agent)}
+          // Always editable: the keyboard must open even before a model is ready.
+          editable
           multiline
           submitBehavior="submit"
         />
         <Pressable
           onPress={() => send(input)}
-          disabled={busy || !input.trim() || !agent}
-          style={[styles.sendBtn, { backgroundColor: t.accent, opacity: busy || !input.trim() || !agent ? 0.4 : 1 }]}
+          disabled={busy || !input.trim()}
+          style={[styles.sendBtn, { backgroundColor: t.accent, opacity: busy || !input.trim() ? 0.4 : 1 }]}
         >
           <Text style={{ color: t.accentText, fontWeight: '600' }}>Send</Text>
         </Pressable>
