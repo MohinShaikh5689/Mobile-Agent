@@ -25,6 +25,8 @@ export interface OnDeviceConfig {
   embedModelPath: string;
   chatCtx: number;
   embedCtx: number;
+  /** KV-cache type for the chat model. q8_0 halves its memory; falls back to f16 if the device rejects it. */
+  chatCacheType?: 'f16' | 'q8_0';
   queryPrefix?: string;
   documentPrefix?: string;
   /** Upper bound on generated tokens per call. */
@@ -84,24 +86,34 @@ export class OnDeviceModel implements ChatModel, Embedder {
 
   /** Loaded on first use, so the app starts fast and the model is mapped only when needed. */
   private chatContext(): Promise<LlamaLike> {
-    this.chatCtx ??= this.init(
-      {
-        model: this.cfg.chatModelPath,
-        n_ctx: this.cfg.chatCtx,
-        n_batch: 512,
-        // Offload every layer to Metal on iOS; ignored where no GPU backend is available.
-        n_gpu_layers: 99,
-        use_mmap: true,
-        use_mlock: false,
-        flash_attn_type: 'auto',
-        ctx_shift: false,
-      },
-      (p) => this.onLoadProgress?.('chat', p),
-    ).catch((e) => {
+    this.chatCtx ??= this.loadChat().catch((e) => {
       this.chatCtx = null;
       throw e;
     });
     return this.chatCtx;
+  }
+
+  private async loadChat(): Promise<LlamaLike> {
+    const base = {
+      model: this.cfg.chatModelPath,
+      n_ctx: this.cfg.chatCtx,
+      n_batch: 512,
+      // Offload every layer to Metal on iOS; ignored where no GPU backend is available.
+      n_gpu_layers: 99,
+      use_mmap: true,
+      use_mlock: false,
+      ctx_shift: false,
+    };
+    const progress = (p: number) => this.onLoadProgress?.('chat', p);
+    if (this.cfg.chatCacheType === 'q8_0') {
+      try {
+        // A quantized V cache needs flash attention.
+        return await this.init({ ...base, flash_attn_type: 'on', cache_type_k: 'q8_0', cache_type_v: 'q8_0' }, progress);
+      } catch {
+        // Some devices or backends reject it: fall through to the plain f16 cache.
+      }
+    }
+    return this.init({ ...base, flash_attn_type: 'auto' }, progress);
   }
 
   private embedContext(): Promise<LlamaLike> {

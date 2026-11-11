@@ -21,9 +21,13 @@ export type RuntimeStatus =
   | { ok: true; model: OnDeviceModel; chat: ModelSpec; embed: ModelSpec }
   | { ok: false; reason: string };
 
-export async function getRuntime(chatId: string, embedId: string): Promise<RuntimeStatus> {
-  const chat = findModel(chatId);
-  const embed = findModel(embedId);
+export async function getRuntime(
+  chatId: string,
+  embedId: string,
+  customModels: ModelSpec[] = [],
+): Promise<RuntimeStatus> {
+  const chat = findModel(chatId, customModels);
+  const embed = findModel(embedId, customModels);
   if (!chat || chat.role !== 'chat') return { ok: false, reason: 'Choose a chat model in Settings.' };
   if (!embed || embed.role !== 'embed') return { ok: false, reason: 'Choose an embedding model in Settings.' };
   const missing = [chat, embed].filter((m) => !isDownloaded(m));
@@ -41,6 +45,7 @@ export async function getRuntime(chatId: string, embedId: string): Promise<Runti
           chatModelPath: modelPath(chat),
           embedModelPath: modelPath(embed),
           chatCtx: chat.nCtx,
+          chatCacheType: chat.cacheType,
           embedCtx: embed.nCtx,
           queryPrefix: embed.queryPrefix,
           documentPrefix: embed.documentPrefix,

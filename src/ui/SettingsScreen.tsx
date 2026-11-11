@@ -6,13 +6,21 @@ import { kv, vectorIndex } from '../appContainer';
 import { isoDate } from '../core/specialists';
 import type { Source } from '../core/types';
 import type { Coverage } from '../core/watermark';
-import type { ModelSpec } from '../core/llm/models';
-import { formatBytes, MODELS } from '../core/llm/models';
+import type { Fit, ModelSpec } from '../core/llm/models';
+import {
+  allModels,
+  customChatModel,
+  estimateMemory,
+  formatBytes,
+  modelFit,
+  recommendedChatModel,
+} from '../core/llm/models';
 import { clientIdsConfigured, useGoogleSignIn } from '../google/auth';
 import type { SyncProgress } from '../google/sync';
 import { loadCoverage } from '../google/sync';
 import type { DownloadHandle } from '../llm/modelStore';
-import { deleteModel, downloadModel, isDownloaded } from '../llm/modelStore';
+import { deviceName, totalRam } from '../llm/device';
+import { deleteModel, downloadedSize, downloadModel, isDownloaded } from '../llm/modelStore';
 import type { Settings } from '../storage/settings';
 import type { Theme } from './theme';
 import { useTheme } from './theme';
@@ -62,6 +70,17 @@ function Field({ label, value, onChange, t, hint }: {
   );
 }
 
+const FIT_LABEL: Record<Fit, string> = {
+  fits: 'Fits',
+  tight: 'Tight: may be closed under memory pressure',
+  too_big: 'Too big for this phone',
+  unknown: 'Size unknown until downloaded',
+};
+
+function fitColor(fit: Fit, t: Theme): string {
+  return fit === 'fits' ? t.accent : fit === 'unknown' ? t.muted : t.error;
+}
+
 /** Download, delete and choose the models that run on the phone. */
 function ModelsCard({ settings, onSave, onModelsChanged, t }: {
   settings: Settings;
@@ -71,14 +90,23 @@ function ModelsCard({ settings, onSave, onModelsChanged, t }: {
 }) {
   const [progress, setProgress] = useState<Record<string, number>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [downloaded, setDownloaded] = useState<Record<string, boolean>>({});
+  const [sizes, setSizes] = useState<Record<string, number>>({});
   const [editingUrl, setEditingUrl] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newUrl, setNewUrl] = useState('');
+  const [addError, setAddError] = useState<string | null>(null);
   const handles = useRef<Record<string, DownloadHandle>>({});
 
-  const refresh = () => setDownloaded(Object.fromEntries(MODELS.map((m) => [m.id, isDownloaded(m)])));
-  useEffect(refresh, []);
+  const ram = totalRam();
+  const recommended = recommendedChatModel(ram);
+  const models = allModels(settings.customModels);
+
+  const refresh = () => setSizes(Object.fromEntries(models.map((m) => [m.id, isDownloaded(m) ? downloadedSize(m) : 0])));
+  useEffect(refresh, [settings.customModels.length]);
 
   const urlFor = (m: ModelSpec) => settings.modelUrls[m.id] ?? m.url;
+  const fitOf = (m: ModelSpec) => modelFit(m, ram, sizes[m.id] || m.sizeBytes);
 
   const start = (m: ModelSpec) => {
     setErrors((e) => ({ ...e, [m.id]: '' }));
@@ -100,14 +128,33 @@ function ModelsCard({ settings, onSave, onModelsChanged, t }: {
       });
   };
 
+  const confirmDownload = (m: ModelSpec) => {
+    const fit = fitOf(m);
+    if (fit === 'fits' || fit === 'unknown') return start(m);
+    Alert.alert(
+      fit === 'tight' ? 'This model is tight on this phone' : 'This model is probably too big',
+      `${m.name} needs about ${formatBytes(estimateMemory(m, sizes[m.id] || m.sizeBytes))} of memory and this phone has ` +
+        `${ram ? formatBytes(ram) : 'an unknown amount'}. iOS or Android may close the app while it runs. Download anyway?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Download', onPress: () => start(m) },
+      ],
+    );
+  };
+
   const remove = (m: ModelSpec) =>
-    Alert.alert(`Delete ${m.name}?`, `Frees ${formatBytes(m.sizeBytes)}. You can download it again later.`, [
+    Alert.alert(`Delete ${m.name}?`, `Frees ${formatBytes(sizes[m.id] || m.sizeBytes)}.`, [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete',
         style: 'destructive',
         onPress: () => {
           deleteModel(m);
+          if (m.custom) {
+            const customModels = settings.customModels.filter((c) => c.id !== m.id);
+            const chatModel = settings.chatModel === m.id ? recommended.id : settings.chatModel;
+            onSave({ ...settings, customModels, chatModel });
+          }
           refresh();
           onModelsChanged();
         },
@@ -117,57 +164,120 @@ function ModelsCard({ settings, onSave, onModelsChanged, t }: {
   const select = (m: ModelSpec) =>
     onSave(m.role === 'chat' ? { ...settings, chatModel: m.id } : { ...settings, embedModel: m.id });
 
+  const addCustom = () => {
+    try {
+      const spec = customChatModel(newName, newUrl);
+      if (models.some((m) => m.id === spec.id)) throw new Error('That model is already in the list.');
+      onSave({ ...settings, customModels: [...settings.customModels, spec] });
+      setAdding(false);
+      setNewName('');
+      setNewUrl('');
+      setAddError(null);
+    } catch (e) {
+      setAddError((e as Error).message);
+    }
+  };
+
+  const groups: { title: string; items: ModelSpec[] }[] = [
+    { title: 'Chat models', items: models.filter((m) => m.role === 'chat' && !m.custom) },
+    { title: 'Your models', items: models.filter((m) => m.custom) },
+    { title: 'Embedding model', items: models.filter((m) => m.role === 'embed') },
+  ];
+
   return (
     <View style={[styles.card, { backgroundColor: t.surface, borderColor: t.border }]}>
       <Text style={[styles.h, { color: t.text }]}>On-device models</Text>
       <Text style={{ color: t.muted }}>
-        The agent runs entirely on this phone. Download one chat model and the embedding model, over Wi-Fi.
+        The agent runs entirely on this phone. Pick one chat model and download it with the embedding model, over Wi-Fi.
+        {ram ? ` ${deviceName()}: ${formatBytes(ram)} of RAM.` : ''}
       </Text>
-      {MODELS.map((m) => {
-        const selected = m.role === 'chat' ? settings.chatModel === m.id : settings.embedModel === m.id;
-        const p = progress[m.id];
-        return (
-          <View key={m.id} style={[styles.model, { borderColor: selected ? t.accent : t.border }]}>
-            <Pressable onPress={() => select(m)} hitSlop={6}>
-              <Text style={{ color: t.text, fontWeight: '600' }}>
-                {selected ? '● ' : '○ '}
-                {m.name}
-              </Text>
-              <Text style={{ color: t.muted, fontSize: 12 }}>
-                {m.role === 'chat' ? 'Chat' : 'Embeddings'} · {formatBytes(m.sizeBytes)} · {m.notes}
-              </Text>
-            </Pressable>
-            <View style={[styles.row, { alignItems: 'center' }]}>
-              {p !== undefined ? (
-                <>
-                  <Text style={{ color: t.muted }}>Downloading {Math.round(p * 100)}%</Text>
-                  <Button label="Cancel" onPress={() => handles.current[m.id]?.cancel()} t={t} kind="secondary" />
-                </>
-              ) : downloaded[m.id] ? (
-                <>
-                  <Text style={{ color: t.accent }}>Downloaded</Text>
-                  <Button label="Delete" onPress={() => remove(m)} t={t} kind="secondary" />
-                </>
-              ) : (
-                <>
-                  <Button label="Download" onPress={() => start(m)} t={t} />
-                  <Button label="Edit URL" onPress={() => setEditingUrl(editingUrl === m.id ? null : m.id)} t={t} kind="secondary" />
-                </>
-              )}
-            </View>
-            {editingUrl === m.id && (
-              <Field
-                label="Download URL"
-                value={urlFor(m)}
-                onChange={(v) => onSave({ ...settings, modelUrls: { ...settings.modelUrls, [m.id]: v } })}
-                t={t}
-                hint="A direct link to the .gguf file."
-              />
-            )}
-            {errors[m.id] ? <Text style={{ color: t.error }}>{errors[m.id]}</Text> : null}
+      {groups.map((g) =>
+        g.items.length === 0 ? null : (
+          <View key={g.title} style={{ gap: 8 }}>
+            <Text style={{ color: t.text, fontWeight: '600', marginTop: 4 }}>{g.title}</Text>
+            {g.items.map((m) => {
+              const selected = m.role === 'chat' ? settings.chatModel === m.id : settings.embedModel === m.id;
+              const p = progress[m.id];
+              const downloaded = (sizes[m.id] ?? 0) > 0;
+              const fit = fitOf(m);
+              const size = sizes[m.id] || m.sizeBytes;
+              return (
+                <View key={m.id} style={[styles.model, { borderColor: selected ? t.accent : t.border }]}>
+                  <Pressable onPress={() => select(m)} hitSlop={6} accessibilityRole="radio" accessibilityState={{ selected }}>
+                    <Text style={{ color: t.text, fontWeight: '600' }}>
+                      {selected ? '● ' : '○ '}
+                      {m.name}
+                      {m.id === recommended.id ? '  · Recommended' : ''}
+                    </Text>
+                    <Text style={{ color: t.muted, fontSize: 12 }}>
+                      {m.params} · {size ? formatBytes(size) : 'size unknown'} · {m.notes}
+                    </Text>
+                    {m.role === 'chat' && (
+                      <Text style={{ color: fitColor(fit, t), fontSize: 12 }}>
+                        {FIT_LABEL[fit]}
+                        {fit !== 'unknown' ? ` (needs about ${formatBytes(estimateMemory(m, size))})` : ''}
+                      </Text>
+                    )}
+                  </Pressable>
+                  <View style={[styles.row, { alignItems: 'center' }]}>
+                    {p !== undefined ? (
+                      <>
+                        <Text style={{ color: t.muted }}>Downloading {Math.round(p * 100)}%</Text>
+                        <Button label="Cancel" onPress={() => handles.current[m.id]?.cancel()} t={t} kind="secondary" />
+                      </>
+                    ) : downloaded ? (
+                      <>
+                        <Text style={{ color: t.accent }}>Downloaded</Text>
+                        <Button label="Delete" onPress={() => remove(m)} t={t} kind="secondary" />
+                      </>
+                    ) : (
+                      <>
+                        <Button label="Download" onPress={() => confirmDownload(m)} t={t} />
+                        <Button
+                          label="Edit URL"
+                          onPress={() => setEditingUrl(editingUrl === m.id ? null : m.id)}
+                          t={t}
+                          kind="secondary"
+                        />
+                        {m.custom && <Button label="Remove" onPress={() => remove(m)} t={t} kind="secondary" />}
+                      </>
+                    )}
+                  </View>
+                  {editingUrl === m.id && (
+                    <Field
+                      label="Download URL"
+                      value={urlFor(m)}
+                      onChange={(v) => onSave({ ...settings, modelUrls: { ...settings.modelUrls, [m.id]: v } })}
+                      t={t}
+                      hint="A direct link to the .gguf file."
+                    />
+                  )}
+                  {errors[m.id] ? <Text style={{ color: t.error }}>{errors[m.id]}</Text> : null}
+                </View>
+              );
+            })}
           </View>
-        );
-      })}
+        ),
+      )}
+      {adding ? (
+        <View style={[styles.model, { borderColor: t.border }]}>
+          <Field label="Name" value={newName} onChange={setNewName} t={t} hint="Optional, for your list." />
+          <Field
+            label="GGUF link"
+            value={newUrl}
+            onChange={setNewUrl}
+            t={t}
+            hint="A direct https link to a .gguf chat model, e.g. a Hugging Face …/resolve/main/…Q4_K_M.gguf link. Q4_K_M is a good size/quality balance."
+          />
+          {addError && <Text style={{ color: t.error }}>{addError}</Text>}
+          <View style={styles.row}>
+            <Button label="Add" onPress={addCustom} t={t} disabled={!newUrl.trim()} />
+            <Button label="Cancel" onPress={() => setAdding(false)} t={t} kind="secondary" />
+          </View>
+        </View>
+      ) : (
+        <Button label="Add a model by link" onPress={() => setAdding(true)} t={t} kind="secondary" />
+      )}
     </View>
   );
 }

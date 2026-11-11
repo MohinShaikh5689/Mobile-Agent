@@ -1,62 +1,113 @@
 /**
- * Models that run on the phone. GGUF files are downloaded once into the app's document directory.
+ * Models that run on the phone. The user picks one chat model and one embedding model; GGUF files
+ * are downloaded once into the app's document directory. Users can also add any GGUF by link.
  *
- * Sizing (Constraints): a 3–4B model at Q4 fits on both targets. On iOS the app carries the
- * increased-memory-limit entitlement so a ~2.5 GB model plus its KV cache stays under the cap.
- * The download URL can be changed in Settings if a file moves.
+ * Memory: weights + KV cache + runtime overhead must fit in what the OS lets one app use. On iOS
+ * the app carries the increased-memory-limit entitlement; even so, an 8B model on an 8 GB phone
+ * is tight (Constraints: "treat it as fragile"). The fit labels below are estimates.
  */
 
 export type ModelRole = 'chat' | 'embed';
+export type CacheType = 'f16' | 'q8_0';
 
 export interface ModelSpec {
   id: string;
   role: ModelRole;
   name: string;
+  /** Parameter count label, for grouping ("1.7B", "4B", "8B"). */
+  params: string;
   url: string;
   fileName: string;
-  /** Approximate download size, for the UI and the free-space check. */
+  /** Approximate download size; 0 when unknown (custom models before download). */
   sizeBytes: number;
   /** Context length the app runs it at. */
   nCtx: number;
+  /**
+   * KV-cache bytes per token at f16: 2 (K and V) × layers × KV heads × head dim × 2 bytes.
+   * Used for the memory estimate.
+   */
+  kvBytesPerToken: number;
+  /** KV-cache type. q8_0 halves the cache; the runtime falls back to f16 if the device rejects it. */
+  cacheType: CacheType;
   notes: string;
-  /** Embedding prefixes, for models trained with them. */
   queryPrefix?: string;
   documentPrefix?: string;
+  /** Added by the user from a link. */
+  custom?: boolean;
 }
 
 const GB = 1024 ** 3;
 const MB = 1024 ** 2;
 
+/** 2 × layers × kvHeads × headDim × 2 bytes (f16). */
+const kv = (layers: number, kvHeads: number, headDim: number) => 2 * layers * kvHeads * headDim * 2;
+
 export const MODELS: ModelSpec[] = [
+  {
+    id: 'qwen3-1.7b-q4km',
+    role: 'chat',
+    name: 'Qwen3 1.7B (Q4_K_M)',
+    params: '1.7B',
+    url: 'https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf',
+    fileName: 'Qwen3-1.7B-Q4_K_M.gguf',
+    sizeBytes: 1.1 * GB,
+    nCtx: 8192,
+    kvBytesPerToken: kv(28, 8, 128),
+    cacheType: 'q8_0',
+    notes: 'For phones with 6 GB of RAM or less. Fastest, but weaker at multi-step tool use.',
+  },
   {
     id: 'qwen3-4b-instruct-2507-q4km',
     role: 'chat',
     name: 'Qwen3 4B Instruct 2507 (Q4_K_M)',
+    params: '4B',
     url: 'https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf',
     fileName: 'Qwen3-4B-Instruct-2507-Q4_K_M.gguf',
     sizeBytes: 2.5 * GB,
     nCtx: 8192,
+    kvBytesPerToken: kv(36, 8, 128),
+    cacheType: 'q8_0',
     notes: 'Default. Strongest sub-7B tool caller on the shortlist.',
   },
   {
     id: 'phi-4-mini-instruct-q4km',
     role: 'chat',
     name: 'Phi-4-mini Instruct 3.8B (Q4_K_M)',
+    params: '4B',
     url: 'https://huggingface.co/unsloth/Phi-4-mini-instruct-GGUF/resolve/main/Phi-4-mini-instruct-Q4_K_M.gguf',
     fileName: 'Phi-4-mini-instruct-Q4_K_M.gguf',
     sizeBytes: 2.5 * GB,
     nCtx: 8192,
+    kvBytesPerToken: kv(32, 8, 128),
+    cacheType: 'q8_0',
     notes: 'Faster, better at planning between calls; somewhat weaker raw tool calls.',
+  },
+  {
+    id: 'qwen3-8b-q4km',
+    role: 'chat',
+    name: 'Qwen3 8B (Q4_K_M)',
+    params: '8B',
+    url: 'https://huggingface.co/unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf',
+    fileName: 'Qwen3-8B-Q4_K_M.gguf',
+    sizeBytes: 5.0 * GB,
+    // A shorter context keeps the KV cache small enough to sit next to 5 GB of weights.
+    nCtx: 4096,
+    kvBytesPerToken: kv(36, 8, 128),
+    cacheType: 'q8_0',
+    notes: 'Best quality. Needs about 6 GB free: comfortable on 12 GB phones, tight on 8 GB.',
   },
   {
     id: 'nomic-embed-text-v1.5-q8',
     role: 'embed',
     name: 'nomic-embed-text v1.5 (Q8_0)',
+    params: '137M',
     url: 'https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q8_0.gguf',
     fileName: 'nomic-embed-text-v1.5.Q8_0.gguf',
     sizeBytes: 146 * MB,
     nCtx: 2048,
-    notes: 'Embeddings for the local index.',
+    kvBytesPerToken: 0,
+    cacheType: 'f16',
+    notes: 'Embeddings for the local index. Needed with any chat model.',
     queryPrefix: 'search_query: ',
     documentPrefix: 'search_document: ',
   },
@@ -65,8 +116,73 @@ export const MODELS: ModelSpec[] = [
 export const DEFAULT_CHAT_MODEL = 'qwen3-4b-instruct-2507-q4km';
 export const DEFAULT_EMBED_MODEL = 'nomic-embed-text-v1.5-q8';
 
-export function findModel(id: string): ModelSpec | undefined {
-  return MODELS.find((m) => m.id === id);
+/** Built-in models plus the user's custom ones. */
+export function allModels(custom: ModelSpec[] = []): ModelSpec[] {
+  return [...MODELS, ...custom];
+}
+
+export function findModel(id: string, custom: ModelSpec[] = []): ModelSpec | undefined {
+  return allModels(custom).find((m) => m.id === id);
+}
+
+/**
+ * A chat model from any direct .gguf link. Assumes a 7–8B-class architecture for the KV estimate,
+ * which overestimates smaller models (safe side).
+ */
+export function customChatModel(name: string, url: string): ModelSpec {
+  const clean = url.trim();
+  const fileName = decodeURIComponent(clean.split('?')[0]?.split('/').pop() ?? '');
+  if (!/^https:\/\//.test(clean)) throw new Error('The link must start with https://');
+  if (!fileName.toLowerCase().endsWith('.gguf')) throw new Error('The link must point to a .gguf file.');
+  return {
+    id: `custom-${fileName.toLowerCase().replace(/[^a-z0-9.]+/g, '-')}`,
+    role: 'chat',
+    name: name.trim() || fileName,
+    params: 'Custom',
+    url: clean,
+    fileName,
+    sizeBytes: 0,
+    nCtx: 4096,
+    kvBytesPerToken: kv(36, 8, 128),
+    cacheType: 'q8_0',
+    notes: 'Added from a link. Tool calling depends on the model.',
+    custom: true,
+  };
+}
+
+/** Runtime overhead beyond weights and KV cache: compute buffers, Metal/CPU scratch, the app itself. */
+const OVERHEAD = 450 * MB;
+
+/** Estimated memory to run a model, in bytes. `sizeBytes` overrides the catalog size (e.g. the real file size). */
+export function estimateMemory(spec: ModelSpec, sizeBytes = spec.sizeBytes): number {
+  const kvFactor = spec.cacheType === 'q8_0' ? 0.53 : 1; // q8_0 ≈ 8.5 bits per value
+  return sizeBytes + spec.kvBytesPerToken * spec.nCtx * kvFactor + OVERHEAD;
+}
+
+export type Fit = 'fits' | 'tight' | 'too_big' | 'unknown';
+
+/**
+ * How a model fits a phone with `totalRam` bytes. The OS keeps a large share for itself; iOS with
+ * the increased-memory-limit entitlement allows roughly 70–80% of RAM to one app.
+ */
+export function modelFit(spec: ModelSpec, totalRam: number | null, sizeBytes = spec.sizeBytes): Fit {
+  if (!totalRam || sizeBytes <= 0) return 'unknown';
+  const share = estimateMemory(spec, sizeBytes) / totalRam;
+  if (share <= 0.6) return 'fits';
+  if (share <= 0.8) return 'tight';
+  return 'too_big';
+}
+
+/** The largest built-in chat model that fits comfortably; the smallest one if none does. */
+export function recommendedChatModel(totalRam: number | null): ModelSpec {
+  const chat = MODELS.filter((m) => m.role === 'chat');
+  if (!totalRam) return findModel(DEFAULT_CHAT_MODEL) as ModelSpec;
+  const fitting = chat.filter((m) => modelFit(m, totalRam) === 'fits');
+  if (fitting.length === 0) return chat.reduce((a, b) => (a.sizeBytes <= b.sizeBytes ? a : b));
+  // Prefer the default among equal-size options (Qwen 4B over Phi-4-mini).
+  return fitting.reduce((a, b) =>
+    b.sizeBytes > a.sizeBytes || (b.sizeBytes === a.sizeBytes && b.id === DEFAULT_CHAT_MODEL) ? b : a,
+  );
 }
 
 export function formatBytes(n: number): string {

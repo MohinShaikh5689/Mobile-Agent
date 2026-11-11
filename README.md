@@ -65,7 +65,16 @@ Python LangGraph cannot ship inside an Android or iOS app; it would need a separ
 
 **iOS entitlements.** `app.json` declares `com.apple.developer.kernel.increased-memory-limit` and `com.apple.developer.kernel.extended-virtual-addressing` for every build, not only production. Enable both capabilities on the App ID (`com.mobileagent.app`) in the Apple Developer portal. EAS Build syncs capabilities automatically; with local Xcode builds, enable them under Signing & Capabilities.
 
-**Models.** On first launch, open **Settings → On-device models** and download one chat model (about 2.5 GB) and the embedding model (about 150 MB), preferably over Wi-Fi. Files go to the app's Documents folder. If a link has moved, use **Edit URL** on that model.
+**Models.** On first launch, open **Settings → On-device models**, pick a chat model, and download it together with the embedding model (about 150 MB), preferably over Wi-Fi. Files go to the app's Documents folder.
+
+| Chat model | Size | Context | Typical fit |
+| --- | --- | --- | --- |
+| Qwen3 1.7B | 1.1 GB | 8K | Phones with 6 GB RAM or less |
+| Qwen3 4B Instruct 2507 (default) | 2.5 GB | 8K | 8 GB phones |
+| Phi-4-mini 3.8B | 2.5 GB | 8K | 8 GB phones |
+| Qwen3 8B | 5.0 GB | 4K | 12 GB phones; tight on 8 GB (iPhone 17) |
+
+The app reads the phone's RAM and labels each model *Fits*, *Tight* or *Too big*. The estimate covers weights, the KV cache (stored at 8-bit, falling back to 16-bit if the device rejects it) and runtime overhead. On a fresh install it preselects the largest model that fits comfortably. You can still download a *Tight* model after a warning; iOS may close the app if memory runs short. **Add a model by link** takes any direct `.gguf` link. If a built-in link has moved, use **Edit URL** on that model.
 
 ### 2. Google OAuth
 

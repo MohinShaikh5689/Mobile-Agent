@@ -30,6 +30,12 @@ export function isDownloaded(spec: ModelSpec): boolean {
   return f.exists && (f.size ?? 0) > 1024 * 1024;
 }
 
+/** Size of the downloaded file in bytes, or 0. */
+export function downloadedSize(spec: ModelSpec): number {
+  const f = modelFile(spec);
+  return f.exists ? (f.size ?? 0) : 0;
+}
+
 export function deleteModel(spec: ModelSpec): void {
   for (const f of [modelFile(spec), new File(modelsDir(), `${spec.fileName}.part`)]) {
     if (f.exists) f.delete();

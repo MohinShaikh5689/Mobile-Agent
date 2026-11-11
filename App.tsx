@@ -4,6 +4,8 @@ import { AppState, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import type { AppContainer } from './src/appContainer';
 import { buildContainer, kv } from './src/appContainer';
+import { recommendedChatModel } from './src/core/llm/models';
+import { totalRam } from './src/llm/device';
 import { onModelLoadProgress, releaseModelMemory } from './src/llm/runtime';
 import type { Settings } from './src/storage/settings';
 import { loadSettings, saveSettings } from './src/storage/settings';
@@ -22,7 +24,7 @@ export default function App() {
   const [loadStatus, setLoadStatus] = useState<string | null>(null);
 
   useEffect(() => {
-    loadSettings(kv).then(setSettings);
+    loadSettings(kv, recommendedChatModel(totalRam()).id).then(setSettings);
   }, []);
 
   /** (Re)builds the agent; called when settings change or a model finishes downloading. */

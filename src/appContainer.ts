@@ -27,7 +27,7 @@ export type ContainerResult = { ok: true; container: AppContainer } | { ok: fals
 
 /** Builds the agent graph around the on-device model. Rebuilt whenever settings change. */
 export async function buildContainer(settings: Settings): Promise<ContainerResult> {
-  const runtime = await getRuntime(settings.chatModel, settings.embedModel);
+  const runtime = await getRuntime(settings.chatModel, settings.embedModel, settings.customModels);
   if (!runtime.ok) return { ok: false, reason: runtime.reason };
   const model = runtime.model;
 
