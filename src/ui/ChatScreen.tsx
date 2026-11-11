@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -85,6 +85,9 @@ function Details({ result, t }: { result: AgentAnswer; t: Theme }) {
       </Pressable>
       {open && (
         <View style={{ marginTop: 6, gap: 3 }}>
+          {result.standalone !== result.question && (
+            <Text style={[styles.mono, { color: t.muted }]}>understood as: {result.standalone}</Text>
+          )}
           <Text style={[styles.mono, { color: t.muted }]}>why: {result.route.reason}</Text>
           <Text style={[styles.mono, { color: t.muted }]}>graph: {result.path.join(' → ')}</Text>
           {result.plan.length > 0 && (
@@ -132,6 +135,29 @@ export function ChatScreen({ agent, unavailable, loadStatus }: {
   const [status, setStatus] = useState('');
   const listRef = useRef<FlatList<Message>>(null);
 
+  // Show the open conversation again after a restart (details of old answers are not kept).
+  useEffect(() => {
+    if (!agent) return;
+    let cancelled = false;
+    agent.history().then((turns) => {
+      if (cancelled || turns.length === 0) return;
+      setMessages((current) =>
+        current.length
+          ? current
+          : turns.map((t, i) => ({ id: `h${t.at}-${i}`, role: t.role === 'user' ? 'user' : 'agent', text: t.text })),
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [agent]);
+
+  const newChat = useCallback(async () => {
+    if (busy) return;
+    await agent?.newConversation();
+    setMessages([]);
+  }, [agent, busy]);
+
   const send = useCallback(
     async (text: string) => {
       const q = text.trim();
@@ -163,6 +189,16 @@ export function ChatScreen({ agent, unavailable, loadStatus }: {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
     >
+      {messages.length > 0 && (
+        <View style={[styles.chatBar, { borderBottomColor: t.border }]}>
+          <Text style={{ color: t.muted, fontSize: 12, flexShrink: 1 }}>
+            The assistant remembers this conversation. Start a new chat to change topic.
+          </Text>
+          <Pressable onPress={newChat} disabled={busy} hitSlop={8} style={{ opacity: busy ? 0.4 : 1 }}>
+            <Text style={{ color: t.accent, fontWeight: '600' }}>New chat</Text>
+          </Pressable>
+        </View>
+      )}
       <FlatList
         ref={listRef}
         data={messages}
@@ -236,6 +272,15 @@ export function ChatScreen({ agent, unavailable, loadStatus }: {
 
 const styles = StyleSheet.create({
   bubble: { borderRadius: 14, padding: 12, maxWidth: '100%' },
+  chatBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
   chip: { borderWidth: 1, borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12 },
   mono: { fontFamily: Platform.select({ ios: 'Menlo', default: 'monospace' }), fontSize: 11 },
   status: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingBottom: 8 },

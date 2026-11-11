@@ -10,6 +10,8 @@ export interface Settings {
   customModels: ModelSpec[];
   /** Per-model download URL overrides, in case a file moves. */
   modelUrls: Record<string, string>;
+  /** Per-model context length chosen by the user; missing = largest that fits the phone. */
+  contextTokens: Record<string, number>;
   maxSteps: number;
 }
 
@@ -18,6 +20,7 @@ export const DEFAULT_SETTINGS: Settings = {
   embedModel: DEFAULT_EMBED_MODEL,
   customModels: [],
   modelUrls: {},
+  contextTokens: {},
   maxSteps: 5,
 };
 
@@ -38,6 +41,7 @@ export async function loadSettings(kv: KeyValueStore, defaultChat?: string): Pro
       embedModel: embed?.role === 'embed' ? embed.id : DEFAULT_SETTINGS.embedModel,
       customModels,
       modelUrls: parsed.modelUrls ?? {},
+      contextTokens: parsed.contextTokens ?? {},
       maxSteps: parsed.maxSteps ?? DEFAULT_SETTINGS.maxSteps,
     };
   } catch {

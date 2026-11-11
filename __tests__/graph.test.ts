@@ -85,7 +85,7 @@ describe('agent graph', () => {
       { content: 'You have Standup at 09:30.', toolCalls: [] },
     ]);
     const r = await makeAgent(model).ask("What's on my calendar tomorrow?");
-    expect(r.path).toEqual(['router', 'specialist']);
+    expect(r.path).toEqual(['contextualize', 'router', 'specialist']);
     expect(seen[0]?.tools?.map((t) => t.name)).toEqual(['list_events', 'read_event']);
     expect(seen[0]?.messages[0]?.content).toMatch(/2026-11-12 to 2026-11-12/);
     expect(r.answer).toBe('You have Standup at 09:30.');
@@ -94,14 +94,14 @@ describe('agent graph', () => {
   it('action: no model call', async () => {
     const { model, seen, jsonSeen } = scripted([]);
     const r = await makeAgent(model).ask('Draft a reply to Sam');
-    expect(r.path).toEqual(['router', 'action']);
+    expect(r.path).toEqual(['contextualize', 'router', 'action']);
     expect(seen.length + jsonSeen.length).toBe(0);
   });
 
   it('fuzzy: retrieve → grade → respond when the grader accepts', async () => {
     const { model, jsonSeen } = scripted([{ content: 'It is attached [1].', toolCalls: [] }], [{ relevant: true }]);
     const r = await makeAgent(model).ask('the thread about the visa paperwork');
-    expect(r.path).toEqual(['router', 'retrieve', 'grade', 'respond']);
+    expect(r.path).toEqual(['contextualize', 'router', 'retrieve', 'grade', 'respond']);
     expect(r.sources.map((s) => s.id)).toEqual(['m1']);
     expect(jsonSeen[0]?.[1]?.content).toMatch(/<data source="search results">/);
     expect(r.answer).toBe('It is attached [1].');
@@ -118,7 +118,7 @@ describe('agent graph', () => {
     );
     const r = await makeAgent(model, {}, live).ask('the thread about the immigration documents');
     expect(MAX_REWRITES).toBe(1);
-    expect(r.path).toEqual(['router', 'retrieve', 'grade', 'rewrite', 'retrieve', 'grade', 'respond']);
+    expect(r.path).toEqual(['contextualize', 'router', 'retrieve', 'grade', 'rewrite', 'retrieve', 'grade', 'respond']);
     expect(live.at(-1)).toEqual(['visa', 'paperwork']);
     expect(r.sources.map((s) => s.id)).toEqual(['m1']);
   });
@@ -126,7 +126,7 @@ describe('agent graph', () => {
   it('fuzzy: a grader failure does not block the answer', async () => {
     const { model } = scripted([{ content: 'answer', toolCalls: [] }], []);
     const r = await makeAgent(model).ask('the thread about the visa paperwork');
-    expect(r.path).toEqual(['router', 'retrieve', 'grade', 'respond']);
+    expect(r.path).toEqual(['contextualize', 'router', 'retrieve', 'grade', 'respond']);
     expect(r.steps.some((s) => s.kind === 'note' && /grader failed/.test(s.message))).toBe(true);
   });
 
@@ -140,7 +140,7 @@ describe('agent graph', () => {
       [{ steps: [{ service: 'calendar', task: 'find the 3pm meeting' }, { service: 'mail', task: 'find the attendees thread' }] }],
     );
     const r = await makeAgent(model).ask('Reschedule my 3pm meeting and draft a note to the attendees');
-    expect(r.path).toEqual(['router', 'planner', 'run_step', 'run_step', 'compose']);
+    expect(r.path).toEqual(['contextualize', 'router', 'planner', 'run_step', 'run_step', 'compose']);
     expect(r.plan.map((p) => p.service)).toEqual(['calendar', 'mail']);
     expect(seen[1]?.messages[1]?.content).toMatch(/Found so far/);
     expect(seen.at(-1)?.messages[1]?.content).toMatch(/Standup tomorrow 09:30\.[\s\S]*Sam sent the visa paperwork\./);
@@ -157,7 +157,7 @@ describe('agent graph', () => {
     const { model } = scripted([{ content: 'ok', toolCalls: [] }]);
     const nodes: string[] = [];
     await makeAgent(model).ask("What's on my calendar tomorrow?", (e) => e.type === 'node' && nodes.push(e.node as string));
-    expect(nodes).toEqual(['router', 'specialist']);
+    expect(nodes).toEqual(['contextualize', 'router', 'specialist']);
   });
 });
 

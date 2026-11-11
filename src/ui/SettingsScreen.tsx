@@ -9,11 +9,15 @@ import type { Coverage } from '../core/watermark';
 import type { Fit, ModelSpec } from '../core/llm/models';
 import {
   allModels,
+  contextOptions,
   customChatModel,
+  effectiveContext,
   estimateMemory,
   formatBytes,
+  formatContext,
   modelFit,
   recommendedChatModel,
+  withContext,
 } from '../core/llm/models';
 import { clientIdsConfigured, useGoogleSignIn } from '../google/auth';
 import type { SyncProgress } from '../google/sync';
@@ -106,7 +110,13 @@ function ModelsCard({ settings, onSave, onModelsChanged, t }: {
   useEffect(refresh, [settings.customModels.length]);
 
   const urlFor = (m: ModelSpec) => settings.modelUrls[m.id] ?? m.url;
-  const fitOf = (m: ModelSpec) => modelFit(m, ram, sizes[m.id] || m.sizeBytes);
+  const sizeOf = (m: ModelSpec) => sizes[m.id] || m.sizeBytes;
+  /** The context this model runs with: the user's choice, else the largest that fits. */
+  const ctxOf = (m: ModelSpec) => effectiveContext(m, ram, settings.contextTokens[m.id], sizeOf(m));
+  const fitOf = (m: ModelSpec, ctx = ctxOf(m)) => modelFit(withContext(m, ctx), ram, sizeOf(m));
+  const memOf = (m: ModelSpec, ctx = ctxOf(m)) => estimateMemory(withContext(m, ctx), sizeOf(m));
+  const setContext = (m: ModelSpec, n: number) =>
+    onSave({ ...settings, contextTokens: { ...settings.contextTokens, [m.id]: n } });
 
   const start = (m: ModelSpec) => {
     setErrors((e) => ({ ...e, [m.id]: '' }));
@@ -133,7 +143,7 @@ function ModelsCard({ settings, onSave, onModelsChanged, t }: {
     if (fit === 'fits' || fit === 'unknown') return start(m);
     Alert.alert(
       fit === 'tight' ? 'This model is tight on this phone' : 'This model is probably too big',
-      `${m.name} needs about ${formatBytes(estimateMemory(m, sizes[m.id] || m.sizeBytes))} of memory and this phone has ` +
+      `${m.name} needs about ${formatBytes(memOf(m))} of memory at a ${formatContext(ctxOf(m))} context, and this phone has ` +
         `${ram ? formatBytes(ram) : 'an unknown amount'}. iOS or Android may close the app while it runs. Download anyway?`,
       [
         { text: 'Cancel', style: 'cancel' },
@@ -210,15 +220,50 @@ function ModelsCard({ settings, onSave, onModelsChanged, t }: {
                       {m.id === recommended.id ? '  · Recommended' : ''}
                     </Text>
                     <Text style={{ color: t.muted, fontSize: 12 }}>
-                      {m.params} · {size ? formatBytes(size) : 'size unknown'} · {m.notes}
+                      {m.params} · {size ? formatBytes(size) : 'size unknown'}
+                      {m.role === 'chat' ? ` · ${formatContext(ctxOf(m))} context` : ''} · {m.notes}
                     </Text>
                     {m.role === 'chat' && (
                       <Text style={{ color: fitColor(fit, t), fontSize: 12 }}>
                         {FIT_LABEL[fit]}
-                        {fit !== 'unknown' ? ` (needs about ${formatBytes(estimateMemory(m, size))})` : ''}
+                        {fit !== 'unknown' ? ` (needs about ${formatBytes(memOf(m))})` : ''}
                       </Text>
                     )}
                   </Pressable>
+                  {m.role === 'chat' && selected && (
+                    <View style={{ gap: 6 }}>
+                      <Text style={{ color: t.text, fontSize: 13 }}>
+                        Context: how much the model reads at once (conversation, search results, the answer).
+                      </Text>
+                      <View style={[styles.row, { gap: 6 }]}>
+                        {contextOptions(m).map((n) => {
+                          const on = ctxOf(m) === n;
+                          const f = fitOf(m, n);
+                          return (
+                            <Pressable
+                              key={n}
+                              onPress={() => setContext(m, n)}
+                              accessibilityRole="radio"
+                              accessibilityState={{ selected: on }}
+                              style={[
+                                styles.chip,
+                                { borderColor: on ? t.accent : t.border, backgroundColor: on ? t.userBubble : 'transparent' },
+                              ]}
+                            >
+                              <Text style={{ color: t.text, fontWeight: on ? '700' : '400' }}>{formatContext(n)}</Text>
+                              <Text style={{ color: fitColor(f, t), fontSize: 11 }}>
+                                {f === 'unknown' ? '—' : formatBytes(memOf(m, n))}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                      <Text style={{ color: t.muted, fontSize: 12 }}>
+                        Longer context uses more memory, and a long prompt takes longer before the answer starts.
+                        {settings.contextTokens[m.id] ? '' : ' Chosen automatically: the largest that fits this phone.'}
+                      </Text>
+                    </View>
+                  )}
                   <View style={[styles.row, { alignItems: 'center' }]}>
                     {p !== undefined ? (
                       <>
@@ -393,4 +438,5 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row', gap: 10, flexWrap: 'wrap' },
   button: { borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10 },
   model: { borderWidth: 1, borderRadius: 10, padding: 12, gap: 8 },
+  chip: { borderWidth: 1, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, alignItems: 'center', minWidth: 64 },
 });

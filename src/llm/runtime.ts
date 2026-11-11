@@ -2,8 +2,9 @@ import { initLlama } from 'llama.rn';
 import type { InitFn } from '../core/llm/onDevice';
 import { OnDeviceModel } from '../core/llm/onDevice';
 import type { ModelSpec } from '../core/llm/models';
-import { findModel } from '../core/llm/models';
-import { isDownloaded, modelPath } from './modelStore';
+import { effectiveContext, findModel } from '../core/llm/models';
+import { totalRam } from './device';
+import { downloadedSize, isDownloaded, modelPath } from './modelStore';
 
 /**
  * Holds the one on-device model instance. Rebuilt only when the chosen models change, and the old
@@ -18,13 +19,15 @@ export function onModelLoadProgress(fn: typeof loadListener): void {
 }
 
 export type RuntimeStatus =
-  | { ok: true; model: OnDeviceModel; chat: ModelSpec; embed: ModelSpec }
+  | { ok: true; model: OnDeviceModel; chat: ModelSpec; embed: ModelSpec; contextTokens: number }
   | { ok: false; reason: string };
 
 export async function getRuntime(
   chatId: string,
   embedId: string,
   customModels: ModelSpec[] = [],
+  /** The user's context choice per model id. */
+  contextChoices: Record<string, number> = {},
 ): Promise<RuntimeStatus> {
   const chat = findModel(chatId, customModels);
   const embed = findModel(embedId, customModels);
@@ -35,7 +38,9 @@ export async function getRuntime(
     return { ok: false, reason: `Download ${missing.map((m) => m.name).join(' and ')} in Settings.` };
   }
 
-  const key = `${chat.id}|${embed.id}`;
+  const contextTokens = effectiveContext(chat, totalRam(), contextChoices[chat.id], downloadedSize(chat) || chat.sizeBytes);
+  // A different context needs a fresh model load (the KV cache is sized at load time).
+  const key = `${chat.id}|${embed.id}|${contextTokens}`;
   if (current?.key !== key) {
     await current?.model.release();
     current = {
@@ -44,7 +49,7 @@ export async function getRuntime(
         {
           chatModelPath: modelPath(chat),
           embedModelPath: modelPath(embed),
-          chatCtx: chat.nCtx,
+          chatCtx: contextTokens,
           chatCacheType: chat.cacheType,
           embedCtx: embed.nCtx,
           queryPrefix: embed.queryPrefix,
@@ -55,7 +60,7 @@ export async function getRuntime(
       ),
     };
   }
-  return { ok: true, model: current.model, chat, embed };
+  return { ok: true, model: current.model, chat, embed, contextTokens };
 }
 
 /**

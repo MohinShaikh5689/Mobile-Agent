@@ -27,7 +27,7 @@ export type ContainerResult = { ok: true; container: AppContainer } | { ok: fals
 
 /** Builds the agent graph around the on-device model. Rebuilt whenever settings change. */
 export async function buildContainer(settings: Settings): Promise<ContainerResult> {
-  const runtime = await getRuntime(settings.chatModel, settings.embedModel, settings.customModels);
+  const runtime = await getRuntime(settings.chatModel, settings.embedModel, settings.customModels, settings.contextTokens);
   if (!runtime.ok) return { ok: false, reason: runtime.reason };
   const model = runtime.model;
 
@@ -57,6 +57,7 @@ export async function buildContainer(settings: Settings): Promise<ContainerResul
         checkpointer,
         kv,
         maxSteps: settings.maxSteps,
+        contextTokens: runtime.contextTokens,
       }),
       indexer: new Indexer({ gmail, drive, index: vectorIndex, embedder: model, kv }),
       model,

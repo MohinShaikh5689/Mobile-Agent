@@ -13,10 +13,19 @@ What is built:
 - **Tool loop:** has a step limit and an error path for every tool error. Untrusted content is always wrapped as data.
 - **Write actions are not built yet.** Requests to draft, send or invite get an explanation instead of an action.
 
+## Conversation memory
+
+The assistant remembers the open conversation, across app restarts, until you tap **New chat**. It fits any context size:
+
+- **Recent turns** stay word for word; **older turns** are folded into a short running summary by the model.
+- **Items already discussed** (emails, docs, events) are remembered by id, so "that email" can be re-read exactly.
+- **Follow-ups are rewritten first.** The graph's first node turns "what did she say after that?" into a standalone question, so routing and search work on it. Each answer's details show how it was understood.
+- **History has a fixed share** of the context, about a fifth: roughly 900 tokens at 4K, 3.6K at 16K, capped at 6K.
+
 ## How it fits together
 
 ```
-START → router ─┬─ structured ─► specialist ─────────────────────────────────► END
+START → contextualize → router ─┬─ structured ─► specialist ─────────────────────────────────► END
                 ├─ fuzzy ──────► retrieve ─► grade ─┬─ relevant ─► respond ─► END
                 │                    ▲              └─ rewrite ──┘ (once)
                 ├─ multi_step ─► planner ─► run_step ⟲ (one per plan step) ─► compose ─► END
@@ -67,12 +76,14 @@ Python LangGraph cannot ship inside an Android or iOS app; it would need a separ
 
 **Models.** On first launch, open **Settings → On-device models**, pick a chat model, and download it together with the embedding model (about 150 MB), preferably over Wi-Fi. Files go to the app's Documents folder.
 
-| Chat model | Size | Context | Typical fit |
+| Chat model | Size | Max context offered | Typical fit |
 | --- | --- | --- | --- |
-| Qwen3 1.7B | 1.1 GB | 8K | Phones with 6 GB RAM or less |
-| Qwen3 4B Instruct 2507 (default) | 2.5 GB | 8K | 8 GB phones |
-| Phi-4-mini 3.8B | 2.5 GB | 8K | 8 GB phones |
-| Qwen3 8B | 5.0 GB | 4K | 12 GB phones; tight on 8 GB (iPhone 17) |
+| Qwen3 1.7B | 1.1 GB | 32K | Phones with 6 GB RAM or less |
+| Qwen3 4B Instruct 2507 (default) | 2.5 GB | 32K | 8 GB phones (16K context on an iPhone 17) |
+| Phi-4-mini 3.8B | 2.5 GB | 32K | 8 GB phones |
+| Qwen3 8B | 5.0 GB | 32K | 12 GB phones (16K); tight on 8 GB |
+
+**Context** (how much the model reads at once) is set per model: 4K, 8K, 16K or 32K. By default the app uses the largest context that fits the phone comfortably, and Settings shows the memory each option needs. A longer context costs memory (the KV cache grows with it) and makes a long prompt slower to start answering.
 
 The app reads the phone's RAM and labels each model *Fits*, *Tight* or *Too big*. The estimate covers weights, the KV cache (stored at 8-bit, falling back to 16-bit if the device rejects it) and runtime overhead. On a fresh install it preselects the largest model that fits comfortably. You can still download a *Tight* model after a warning; iOS may close the app if memory runs short. **Add a model by link** takes any direct `.gguf` link. If a built-in link has moved, use **Edit URL** on that model.
 

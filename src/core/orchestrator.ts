@@ -3,6 +3,8 @@ import type { TraceStep } from './agent';
 import type { AgentGraph, AgentStateType, PlanStep } from './graph/agentGraph';
 import { buildAgentGraph } from './graph/agentGraph';
 import type { ChatModel } from './llm/types';
+import type { Conversation, Turn } from './memory';
+import { compact, ConversationStore, extractRefs, historyBudget, mergeRefs, renderHistory } from './memory';
 import type { HybridRetriever, RetrievalTraceEntry } from './retriever';
 import type { RouteDecision } from './router';
 import type { KeyValueStore, Services } from './services';
@@ -28,6 +30,9 @@ export interface AgentAnswer {
   /** Graph nodes in the order they ran. */
   path: string[];
   threadId: string;
+  question: string;
+  /** The question as the graph understood it (follow-ups rewritten to stand alone). */
+  standalone: string;
 }
 
 export interface AgentDeps {
@@ -43,6 +48,8 @@ export interface AgentDeps {
   /** Graph super-steps per run; a guard against loops on top of each node's own step limit. */
   recursionLimit?: number;
   keepThreads?: number;
+  /** The chat model's context length; sets how much conversation history each turn carries. */
+  contextTokens?: number;
 }
 
 const THREADS_KEY = 'agent.threads';
@@ -52,9 +59,14 @@ export class Agent {
   readonly graph: AgentGraph;
   private clock: Clock;
   private listeners = new Map<string, (step: TraceStep) => void>();
+  /** Conversation memory; present when the agent has a key-value store. */
+  readonly conversations: ConversationStore | null;
+  /** Folding old turns into the summary runs after an answer is returned; the next turn waits for it. */
+  private compacting: Promise<void> = Promise.resolve();
 
   constructor(private deps: AgentDeps) {
     this.clock = deps.clock ?? systemClock;
+    this.conversations = deps.kv ? new ConversationStore(deps.kv) : null;
     this.graph = buildAgentGraph(
       {
         model: deps.model,
@@ -69,7 +81,49 @@ export class Agent {
     );
   }
 
+  private get budget(): number {
+    return historyBudget(this.deps.contextTokens ?? 8192);
+  }
+
+  /** The open conversation's messages, for showing the chat after a restart. */
+  async history(): Promise<Turn[]> {
+    if (!this.conversations) return [];
+    await this.compacting;
+    return (await this.conversations.current(this.clock.now())).turns;
+  }
+
+  /** Forgets the current conversation and starts a new one. */
+  async newConversation(): Promise<void> {
+    await this.compacting;
+    await this.conversations?.start(this.clock.now());
+  }
+
   async ask(question: string, onEvent?: (e: AgentEvent) => void): Promise<AgentAnswer> {
+    await this.compacting;
+    const conv = this.conversations ? await this.conversations.current(this.clock.now()) : null;
+    const history = renderHistory(conv, this.budget);
+    const result = await this.run(question, history, onEvent);
+    if (conv) this.remember(conv, question, result);
+    return result;
+  }
+
+  /** Saves the turn now; compaction (a model call) finishes in the background. */
+  private remember(conv: Conversation, question: string, result: AgentAnswer): void {
+    const now = this.clock.now();
+    const updated: Conversation = {
+      ...conv,
+      turns: [...conv.turns, { role: 'user', text: question, at: now }, { role: 'assistant', text: result.answer, at: now }],
+      refs: mergeRefs(extractRefs(result.sources, result.steps), conv.refs),
+    };
+    const store = this.conversations as ConversationStore;
+    this.compacting = (async () => {
+      await store.save(updated);
+      const compacted = await compact(updated, this.deps.model, this.budget);
+      if (compacted !== updated) await store.save(compacted);
+    })().catch(() => undefined);
+  }
+
+  private async run(question: string, history: string, onEvent?: (e: AgentEvent) => void): Promise<AgentAnswer> {
     const threadId = `run-${this.clock.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const config = { configurable: { thread_id: threadId }, recursionLimit: this.deps.recursionLimit ?? 25 };
     const path: string[] = [];
@@ -78,7 +132,7 @@ export class Agent {
     this.listeners.set(threadId, (step) => onEvent?.({ type: 'step', step }));
     try {
       // 'updates' says which node just ran; 'values' carries the full state after it.
-      const stream = await this.graph.stream({ question }, { ...config, streamMode: ['updates', 'values'] });
+      const stream = await this.graph.stream({ question, history }, { ...config, streamMode: ['updates', 'values'] });
       for await (const chunk of stream) {
         const [mode, data] = chunk as [string, Record<string, unknown>];
         if (mode === 'values') {
@@ -109,6 +163,8 @@ export class Agent {
       plan: state.plan ?? [],
       path,
       threadId,
+      question,
+      standalone: state.standalone || question,
     };
   }
 
