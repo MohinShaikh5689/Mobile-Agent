@@ -34,6 +34,15 @@ const ROUTE_LABEL: Record<Route, string> = {
   action: 'Action',
 };
 
+/** What the user sees while each graph node's successor runs. */
+const NODE_STATUS: Record<string, string> = {
+  retrieve: 'Checking the results…',
+  grade: 'Writing the answer…',
+  rewrite: 'Searching again with a better query…',
+  planner: 'Working through the plan…',
+  run_step: 'Next step…',
+};
+
 const EXAMPLES = [
   "What's on my calendar tomorrow?",
   'Any unread mail from today?',
@@ -77,6 +86,12 @@ function Details({ result, t }: { result: AgentAnswer; t: Theme }) {
       {open && (
         <View style={{ marginTop: 6, gap: 3 }}>
           <Text style={[styles.mono, { color: t.muted }]}>why: {result.route.reason}</Text>
+          <Text style={[styles.mono, { color: t.muted }]}>graph: {result.path.join(' → ')}</Text>
+          {result.plan.length > 0 && (
+            <Text style={[styles.mono, { color: t.muted }]}>
+              plan: {result.plan.map((p) => `${p.service}: ${p.task}`).join(' | ')}
+            </Text>
+          )}
           {result.route.window && (
             <Text style={[styles.mono, { color: t.muted }]}>window: {windowText(result.route.window)}</Text>
           )}
@@ -121,7 +136,7 @@ export function ChatScreen({ agent }: { agent: Agent | null }) {
       try {
         const result = await agent.ask(q, (e) => {
           if (e.type === 'route' && e.route) setStatus(`${ROUTE_LABEL[e.route.route]}…`);
-          if (e.type === 'retrieval') setStatus('Reading results…');
+          if (e.type === 'node' && e.node && NODE_STATUS[e.node]) setStatus(NODE_STATUS[e.node] as string);
           if (e.type === 'step' && e.step?.kind === 'tool') setStatus(`Calling ${e.step.name}…`);
         });
         setMessages((m) => [...m, { id: `${Date.now()}a`, role: 'agent', text: result.answer, result }]);

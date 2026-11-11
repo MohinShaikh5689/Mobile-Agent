@@ -1,3 +1,4 @@
+import { DurableCheckpointSaver } from './core/graph/checkpointer';
 import { OllamaChatModel } from './core/llm/ollama';
 import { Agent } from './core/orchestrator';
 import { HybridRetriever } from './core/retriever';
@@ -12,6 +13,8 @@ import { SqliteKeyValueStore, SqliteVectorIndex } from './storage/sqlite';
 
 export const kv = new SqliteKeyValueStore();
 export const vectorIndex = new SqliteVectorIndex();
+/** Graph checkpoints live in the same on-device SQLite database. */
+export const checkpointer = new DurableCheckpointSaver(kv);
 
 export interface AppContainer {
   agent: Agent;
@@ -42,7 +45,15 @@ export function buildContainer(settings: Settings): AppContainer {
   });
 
   return {
-    agent: new Agent({ model, retriever, services, maxSteps: settings.maxSteps }),
+    agent: new Agent({
+      model,
+      retriever,
+      services,
+      loadCoverage: () => loadCoverage(kv),
+      checkpointer,
+      kv,
+      maxSteps: settings.maxSteps,
+    }),
     indexer: new Indexer({ gmail, drive, index: vectorIndex, embedder: model, kv }),
     model,
   };

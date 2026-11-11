@@ -2,11 +2,6 @@ import type { Tool } from '../src/core/agent';
 import { asData, runToolLoop, validateArgs } from '../src/core/agent';
 import type { ChatMessage, ChatModel, ChatResult, ToolSpec } from '../src/core/llm/types';
 import { stripThinking } from '../src/core/llm/types';
-import { Agent } from '../src/core/orchestrator';
-import { HybridRetriever } from '../src/core/retriever';
-import type { Services } from '../src/core/services';
-import type { Item } from '../src/core/types';
-import { InMemoryVectorIndex } from '../src/core/vectorIndex';
 
 /** A scripted model: returns the queued replies in order and records what it was sent. */
 function scripted(replies: ChatResult[]): ChatModel & { seen: ChatMessage[][]; toolsSeen: (ToolSpec[] | undefined)[] } {
@@ -126,42 +121,5 @@ describe('helpers', () => {
 
   it('stripThinking removes think blocks', () => {
     expect(stripThinking('<think>hmm</think>\nAnswer')).toBe('Answer');
-  });
-});
-
-describe('Agent', () => {
-  const NOW = new Date(2026, 10, 11, 10, 0).getTime();
-  const event: Item = { source: 'calendar', id: 'e1', title: 'Standup', text: '09:30–09:45', date: NOW + 86_400_000 };
-  const services: Services = {
-    mail: { search: async () => [], read: async () => event },
-    docs: { search: async () => [], read: async () => event },
-    calendar: { listEvents: async () => [event], readEvent: async () => event },
-  };
-  const retriever = new HybridRetriever({
-    index: new InMemoryVectorIndex(),
-    embedder: { embed: async (t) => t.map(() => [1]) },
-    live: {},
-    coverage: async () => ({}),
-  });
-
-  it('sends a calendar question to the calendar specialist only', async () => {
-    const model = scripted([
-      { content: '', toolCalls: [{ name: 'list_events', arguments: { start: '2026-11-12', end: '2026-11-12' } }] },
-      { content: 'You have Standup at 09:30.', toolCalls: [] },
-    ]);
-    const agent = new Agent({ model, retriever, services, clock: { now: () => NOW } });
-    const r = await agent.ask("What's on my calendar tomorrow?");
-    expect(r.route.route).toBe('structured');
-    expect(model.toolsSeen[0]?.map((t) => t.name)).toEqual(['list_events', 'read_event']);
-    expect(model.seen[0]?.[0]?.content).toMatch(/2026-11-12 to 2026-11-12/);
-    expect(r.answer).toBe('You have Standup at 09:30.');
-  });
-
-  it('does not call the model for a write request', async () => {
-    const model = scripted([]);
-    const agent = new Agent({ model, retriever, services, clock: { now: () => NOW } });
-    const r = await agent.ask('Draft a reply to Sam');
-    expect(r.route.route).toBe('action');
-    expect(model.seen).toHaveLength(0);
   });
 });

@@ -1,5 +1,5 @@
 import type { ChatMessage, ChatModel, ChatResult, Embedder, ToolCall, ToolSpec } from './types';
-import { stripThinking } from './types';
+import { parseJsonObject, stripThinking } from './types';
 
 export interface OllamaConfig {
   /** e.g. http://192.168.1.20:11434 — the laptop running `ollama serve` with OLLAMA_HOST=0.0.0.0 */
@@ -92,6 +92,23 @@ export class OllamaChatModel implements ChatModel, Embedder {
       arguments: parseArgs(c.function.arguments),
     }));
     return { content: stripThinking(res.message?.content ?? ''), toolCalls };
+  }
+
+  async chatJson(messages: ChatMessage[], schema: Record<string, unknown>): Promise<unknown> {
+    // Ollama constrains decoding to the schema via `format`.
+    const res = await postJson<OllamaChatResponse>(
+      this.fetchFn,
+      this.url('/api/chat'),
+      {
+        model: this.cfg.chatModel,
+        messages: messages.map(toOllamaMessage),
+        stream: false,
+        format: schema,
+        options: { temperature: 0, num_ctx: this.cfg.numCtx ?? 8192 },
+      },
+      this.cfg.timeoutMs ?? 120_000,
+    );
+    return parseJsonObject(res.message?.content ?? '');
   }
 
   async embed(texts: string[]): Promise<number[][]> {

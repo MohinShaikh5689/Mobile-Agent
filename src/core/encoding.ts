@@ -72,3 +72,36 @@ export function htmlToText(html: string): string {
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
+
+/** Standard base64 for bytes, used to store checkpoint blobs as text. */
+export function bytesToBase64(bytes: Uint8Array): string {
+  let out = '';
+  let i = 0;
+  for (; i + 2 < bytes.length; i += 3) {
+    const n = ((bytes[i] as number) << 16) | ((bytes[i + 1] as number) << 8) | (bytes[i + 2] as number);
+    out += ALPHABET[(n >> 18) & 63]! + ALPHABET[(n >> 12) & 63]! + ALPHABET[(n >> 6) & 63]! + ALPHABET[n & 63]!;
+  }
+  const rest = bytes.length - i;
+  if (rest === 1) {
+    const n = (bytes[i] as number) << 16;
+    out += ALPHABET[(n >> 18) & 63]! + ALPHABET[(n >> 12) & 63]! + '==';
+  } else if (rest === 2) {
+    const n = ((bytes[i] as number) << 16) | ((bytes[i + 1] as number) << 8);
+    out += ALPHABET[(n >> 18) & 63]! + ALPHABET[(n >> 12) & 63]! + ALPHABET[(n >> 6) & 63]! + '=';
+  }
+  return out;
+}
+
+export const base64ToBytes = base64UrlToBytes;
+
+export function utf8Encode(s: string): Uint8Array {
+  const out: number[] = [];
+  for (const ch of s) {
+    const cp = ch.codePointAt(0) as number;
+    if (cp < 0x80) out.push(cp);
+    else if (cp < 0x800) out.push(0xc0 | (cp >> 6), 0x80 | (cp & 63));
+    else if (cp < 0x10000) out.push(0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63));
+    else out.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 63), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63));
+  }
+  return Uint8Array.from(out);
+}
