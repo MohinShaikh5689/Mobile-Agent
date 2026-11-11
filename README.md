@@ -77,7 +77,7 @@ In the [Google Cloud Console](https://console.cloud.google.com/), in one project
 2. **OAuth consent screen:** choose *External*, leave it in **Testing**, and add every Google account that will sign in as a **test user**. Add the scopes `gmail.readonly`, `drive.readonly` and `calendar.readonly`.
 3. **Create the client IDs** (Credentials → Create credentials → OAuth client ID):
    - **iOS:** bundle ID `com.mobileagent.app`. This is the one the IPA needs.
-   - **Android:** package `com.mobileagent.app`, plus the SHA-1 of the signing key (`cd android && ./gradlew signingReport` after a prebuild).
+   - **Android:** package `com.mobileagent.app`, plus the **SHA-1 of your release keystore** (see *Android APK* below; the APK workflow prints it). Then open the client's **Advanced settings** and turn on **Enable custom URI scheme**: the app redirects to `com.mobileagent.app:/oauthredirect`, and Google turns custom schemes off for new Android clients.
 4. **Give the IDs to the build:**
    - Locally: copy `.env.example` to `.env` and fill them in.
    - In GitHub Actions: add them as repository **variables** (not secrets) named `EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID` and `EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID`.
@@ -126,6 +126,32 @@ The **iOS unsigned IPA** workflow (`.github/workflows/ios-unsigned-ipa.yml`) bui
 - **Entitlements:** the app is ad-hoc signed with its entitlements (no certificate), because sideloading tools re-sign with whatever entitlements the binary carries. Whether iOS honours `increased-memory-limit` then depends on the Apple ID that signs it. If your signing tool or account drops it, large models may be killed for using too much memory. Check the tool's log for the entitlement.
 - **Bundle ID:** a free Apple ID usually rewrites the bundle ID when signing. Google sign-in still returns to the app, because it uses the reversed client ID scheme, not the bundle ID.
 - **Build time:** the build compiles llama.cpp and takes roughly 30–60 minutes on a GitHub macOS runner.
+
+### Android APK
+
+The **Android APK** workflow (`.github/workflows/android-apk.yml`) builds an arm64 release APK, signed with your own keystore, and uploads it as an artifact. Install it on the phone directly; allow installs from your browser or file manager when Android asks.
+
+Google identifies the Android app by its package name plus the SHA-1 of the key that signs it. So create one keystore and **keep it**: an APK signed with a different key cannot sign in.
+
+1. Create the keystore once, on any machine with Java:
+
+   ```bash
+   keytool -genkeypair -v -keystore mobile-agent.keystore -alias mobile-agent -keyalg RSA -keysize 2048 -validity 10000
+   ```
+
+2. Print its SHA-1 and put it in the Google Cloud **Android** OAuth client:
+
+   ```bash
+   keytool -list -v -keystore mobile-agent.keystore -alias mobile-agent | grep SHA1
+   ```
+
+3. Add repository **secrets**:
+   - `ANDROID_KEYSTORE_BASE64`: the keystore as base64 (`base64 -w0 mobile-agent.keystore`; on macOS, `base64 -i mobile-agent.keystore`).
+   - `ANDROID_KEYSTORE_PASSWORD` and `ANDROID_KEY_PASSWORD`: the passwords you chose.
+   - `ANDROID_KEY_ALIAS`: `mobile-agent`.
+4. Add the repository **variable** `EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID` with the Android client ID.
+
+`plugins/withReleaseSigning.js` makes release builds use that keystore. Without the secrets, the workflow still builds, but signs with React Native's public debug key and warns. Like the iOS build, it compiles llama.cpp and takes a while.
 
 ## Development
 

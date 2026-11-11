@@ -1,0 +1,118 @@
+name: Android APK
+
+# Builds a release APK signed with your own keystore, for installing directly on a phone.
+# Google sign-in on Android is bound to the package name + the SHA-1 of this key, so always sign
+# with the same keystore. The SHA-1 is printed in the log for the Google Cloud console.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test -- --ci
+
+  apk:
+    name: Build release APK
+    needs: check
+    runs-on: ubuntu-latest
+    # llama.rn compiles llama.cpp for arm64, which is the slow part.
+    timeout-minutes: 90
+    env:
+      EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID: ${{ vars.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID }}
+      EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID: ${{ vars.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID }}
+      EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID: ${{ vars.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Set up the signing keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set: the APK is signed with React Native's public debug key. Google sign-in will only work if your Android OAuth client uses that key's SHA-1, and anyone can sign with it."
+            exit 0
+          fi
+          KS="$RUNNER_TEMP/release.keystore"
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$KS"
+          {
+            echo "ANDROID_KEYSTORE_FILE=$KS"
+            echo "ANDROID_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "ANDROID_KEY_ALIAS=$KEY_ALIAS"
+            echo "ANDROID_KEY_PASSWORD=${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
+          } >> "$GITHUB_ENV"
+          echo "SHA-1 for the Google Cloud Android OAuth client:"
+          keytool -list -v -keystore "$KS" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" | grep -E "SHA1:"
+
+      - name: Check Google OAuth client ID
+        run: |
+          if [ -z "$EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID" ]; then
+            echo "::warning::EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID is not set as a repository variable. The APK will build, but Google sign-in will be disabled in it."
+          fi
+
+      # app.config.ts registers com.mobileagent.app as the OAuth redirect scheme and adds the
+      # release-signing plugin (plugins/withReleaseSigning.js).
+      - name: Generate the native Android project
+        run: npx expo prebuild --platform android --no-install --clean
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Build release APK (arm64)
+        working-directory: android
+        # Phones that can run a 4B model are all arm64; one ABI keeps the build and the APK small.
+        run: ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a --no-daemon
+
+      - name: Name the APK
+        id: apk
+        run: |
+          APK=$(ls android/app/build/outputs/apk/release/*.apk | head -n 1)
+          VERSION=$(node -p "require('./app.json').expo.version")
+          NAME="MobileAgent-${VERSION}-${GITHUB_SHA::7}-arm64.apk"
+          mv "$APK" "$NAME"
+          echo "Signed with:"
+          "$ANDROID_HOME"/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)/apksigner verify --print-certs "$NAME" | grep -E "SHA-1|DN"
+          echo "path=$NAME" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+          retention-days: 30
