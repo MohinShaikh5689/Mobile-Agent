@@ -400,6 +400,26 @@ export function SettingsScreen({ settings, onSave, container, onModelsChanged }:
           )}
         </View>
         <Text style={{ color: t.muted }}>{google.signedIn ? 'Signed in.' : 'Not signed in.'}</Text>
+        {google.signedIn && google.granted && (
+          <View style={{ gap: 4 }}>
+            {(
+              [
+                ['mail', 'Gmail'],
+                ['docs', 'Google Drive'],
+                ['calendar', 'Google Calendar'],
+              ] as const
+            ).map(([key, label]) => (
+              <Text key={key} style={{ color: google.granted?.[key] ? t.accent : t.error }}>
+                {google.granted?.[key] ? '✓' : '✗'} {label}
+              </Text>
+            ))}
+            {!(google.granted.mail && google.granted.docs && google.granted.calendar) && (
+              <Text style={{ color: t.error, fontSize: 12 }}>
+                Some access was not granted. Sign out, sign in again, and tick every box on Google's permission screen.
+              </Text>
+            )}
+          </View>
+        )}
         {google.error && <Text style={{ color: t.error }}>{google.error}</Text>}
       </View>
 

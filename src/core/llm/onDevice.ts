@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatModel, ChatResult, EmbedKind, Embedder, ToolCall, ToolSpec } from './types';
+import type { ChatMessage, ChatModel, ChatOptions, ChatResult, EmbedKind, Embedder, ToolCall, ToolSpec } from './types';
 import { parseJsonObject, stripThinking } from './types';
 
 /**
@@ -104,31 +104,52 @@ export class OnDeviceModel implements ChatModel, Embedder {
       use_mlock: false,
       ctx_shift: false,
     };
-    const progress = (p: number) => this.onLoadProgress?.('chat', p);
-    if (this.cfg.chatCacheType === 'q8_0') {
-      try {
-        // A quantized V cache needs flash attention.
-        return await this.init({ ...base, flash_attn_type: 'on', cache_type_k: 'q8_0', cache_type_v: 'q8_0' }, progress);
-      } catch {
-        // Some devices or backends reject it: fall through to the plain f16 cache.
+    return this.withLoadProgress('chat', async (progress) => {
+      if (this.cfg.chatCacheType === 'q8_0') {
+        try {
+          // A quantized V cache needs flash attention.
+          return await this.init({ ...base, flash_attn_type: 'on', cache_type_k: 'q8_0', cache_type_v: 'q8_0' }, progress);
+        } catch {
+          // Some devices or backends reject it: fall through to the plain f16 cache.
+        }
       }
+      return this.init({ ...base, flash_attn_type: 'auto' }, progress);
+    });
+  }
+
+  /**
+   * Reports load progress only while a load is running, and always ends with 100 (also on
+   * failure). Native progress events arrive asynchronously and can land after the load finished;
+   * those are dropped, so a stale "Loading…" never sticks.
+   */
+  private async withLoadProgress<T>(which: 'chat' | 'embed', run: (progress: (p: number) => void) => Promise<T>): Promise<T> {
+    let finished = false;
+    const progress = (p: number) => {
+      if (!finished) this.onLoadProgress?.(which, Math.min(p, 99));
+    };
+    try {
+      return await run(progress);
+    } finally {
+      finished = true;
+      this.onLoadProgress?.(which, 100);
     }
-    return this.init({ ...base, flash_attn_type: 'auto' }, progress);
   }
 
   private embedContext(): Promise<LlamaLike> {
-    this.embedCtx ??= this.init(
-      {
-        model: this.cfg.embedModelPath,
-        embedding: true,
-        pooling_type: 'mean',
-        n_ctx: this.cfg.embedCtx,
-        n_batch: this.cfg.embedCtx,
-        n_ubatch: this.cfg.embedCtx,
-        n_gpu_layers: 99,
-        use_mmap: true,
-      },
-      (p) => this.onLoadProgress?.('embed', p),
+    this.embedCtx ??= this.withLoadProgress('embed', (progress) =>
+      this.init(
+        {
+          model: this.cfg.embedModelPath,
+          embedding: true,
+          pooling_type: 'mean',
+          n_ctx: this.cfg.embedCtx,
+          n_batch: this.cfg.embedCtx,
+          n_ubatch: this.cfg.embedCtx,
+          n_gpu_layers: 99,
+          use_mmap: true,
+        },
+        progress,
+      ),
     ).catch((e) => {
       this.embedCtx = null;
       throw e;
@@ -136,14 +157,18 @@ export class OnDeviceModel implements ChatModel, Embedder {
     return this.embedCtx;
   }
 
-  async chat(messages: ChatMessage[], tools?: ToolSpec[]): Promise<ChatResult> {
+  async chat(messages: ChatMessage[], tools?: ToolSpec[], opts?: ChatOptions): Promise<ChatResult> {
     const ctx = await this.chatContext();
     const res = await this.chatQueue.run(() =>
       ctx.completion({
         messages: toOaiMessages(messages),
         jinja: true,
         ...(tools?.length
-          ? { tools: tools.map((t) => ({ type: 'function', function: t })), tool_choice: 'auto', parallel_tool_calls: false }
+          ? {
+              tools: tools.map((t) => ({ type: 'function', function: t })),
+              tool_choice: opts?.toolChoice ?? 'auto',
+              parallel_tool_calls: false,
+            }
           : {}),
         // Deterministic output makes eval runs comparable.
         temperature: 0,
@@ -188,18 +213,24 @@ export class OnDeviceModel implements ChatModel, Embedder {
     });
   }
 
-  /** Frees both models' memory. */
+  /**
+   * Frees both models' memory. Waits for a running completion or embedding to finish first, so a
+   * context is never freed while native code is using it.
+   */
   async release(): Promise<void> {
-    const ctxs = [this.chatCtx, this.embedCtx];
+    const chat = this.chatCtx;
+    const embed = this.embedCtx;
     this.chatCtx = null;
     this.embedCtx = null;
-    for (const c of ctxs) {
-      if (!c) continue;
+    const free = async (c: Promise<LlamaLike> | null) => {
+      if (!c) return;
       try {
         await (await c).release();
       } catch {
-        // already gone
+        // already gone, or never loaded
       }
-    }
+    };
+    await Promise.all([this.chatQueue.run(() => free(chat)), this.embedQueue.run(() => free(embed))]);
   }
+
 }

@@ -79,16 +79,54 @@ function makeAgent(model: ChatModel, extra: Partial<ConstructorParameters<typeof
 }
 
 describe('agent graph', () => {
-  it('structured: router → specialist, with only that service’s tools', async () => {
-    const { model, seen } = scripted([
-      { content: '', toolCalls: [{ name: 'list_events', arguments: { start: '2026-11-12', end: '2026-11-12' } }] },
-      { content: 'You have Standup at 09:30.', toolCalls: [] },
-    ]);
+  it('calendar: the code fetches the events, the model only answers', async () => {
+    const { model, seen } = scripted([{ content: 'You have Standup at 09:30.', toolCalls: [] }]);
     const r = await makeAgent(model).ask("What's on my calendar tomorrow?");
     expect(r.path).toEqual(['contextualize', 'router', 'specialist']);
-    expect(seen[0]?.tools?.map((t) => t.name)).toEqual(['list_events', 'read_event']);
-    expect(seen[0]?.messages[0]?.content).toMatch(/2026-11-12 to 2026-11-12/);
+    // The events were fetched before the model ran, for tomorrow's date.
+    expect(r.steps[0]).toMatchObject({ kind: 'tool', name: 'list_events', args: { start: '2026-11-12', end: '2026-11-12' }, ok: true });
+    expect(seen[0]?.messages[1]?.content).toContain('Standup');
+    // The model may only open one event for details.
+    expect(seen[0]?.tools?.map((t) => t.name)).toEqual(['read_event']);
     expect(r.answer).toBe('You have Standup at 09:30.');
+  });
+
+  it('calendar: "upcoming" with no date looks at the next 7 days', async () => {
+    const { model } = scripted([{ content: 'Standup tomorrow.', toolCalls: [] }]);
+    const r = await makeAgent(model).ask('Any upcoming events on my calendar??');
+    expect(r.steps[0]).toMatchObject({ name: 'list_events', args: { start: '2026-11-11', end: '2026-11-18' } });
+  });
+
+  it('calendar: a permission error is the answer, not a guess', async () => {
+    const denied: Services = {
+      ...services,
+      calendar: {
+        listEvents: async () => {
+          throw Object.assign(new Error('Google Calendar access was not granted when you signed in.'), { fatal: true });
+        },
+        readEvent: async () => event,
+      },
+    };
+    const { model, seen } = scripted([]);
+    const agent = new Agent({ model, retriever: makeRetriever([]), services: denied, loadCoverage: async () => ({}), clock: { now: () => NOW } });
+    const r = await agent.ask("What's on my calendar tomorrow?");
+    expect(r.answer).toBe('Google Calendar access was not granted when you signed in.');
+    expect(seen).toHaveLength(0);
+  });
+
+  it('mail lookups must call a tool before answering', async () => {
+    const calls: (string | undefined)[] = [];
+    const model: ChatModel = {
+      async chat(_m, _tools, opts) {
+        calls.push(opts?.toolChoice);
+        return calls.length === 1
+          ? { content: '', toolCalls: [{ name: 'search_mail', arguments: { unread_only: true } }] }
+          : { content: 'One unread email.', toolCalls: [] };
+      },
+    };
+    const r = await makeAgent(model).ask('Any unread mail from today?');
+    expect(calls).toEqual(['required', 'auto']);
+    expect(r.answer).toBe('One unread email.');
   });
 
   it('action: no model call', async () => {

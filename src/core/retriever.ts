@@ -24,6 +24,8 @@ export interface RetrievalTraceEntry {
   liveHits: number;
   fallback: boolean;
   error?: string;
+  /** The live fetch failed for a reason retrying will not fix (sign-in, permission, API off). */
+  fatal?: boolean;
 }
 
 export interface RetrievalResult {
@@ -117,6 +119,7 @@ export class HybridRetriever {
       } catch (e) {
         // A failed live fetch should not throw away good index results.
         trace.error = (e as Error).message;
+        trace.fatal = trace.fatal || Boolean((e as { fatal?: boolean }).fatal);
       }
       trace.liveHits = liveResults.length;
     }
@@ -132,6 +135,7 @@ export class HybridRetriever {
         merged = mergeResults([merged, fallback], this.k * 2);
       } catch (e) {
         trace.error = (e as Error).message;
+        trace.fatal = trace.fatal || Boolean((e as { fatal?: boolean }).fatal);
       }
     }
     return { results: merged, trace };

@@ -84,3 +84,38 @@ describe('download errors', () => {
     expect(explainDownloadError('The Internet connection appears to be offline.', url)).toMatch(/Could not reach huggingface\.co/);
   });
 });
+
+describe('Google permission errors', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { explainGoogleError, GoogleAccessError } = require('../src/google/http');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { grantedServices } = require('../src/google/scopes');
+  const cal = 'https://www.googleapis.com/calendar/v3/calendars/primary/events?x=1';
+
+  it('says when the API is off in the Cloud project', () => {
+    const body = JSON.stringify({ error: { code: 403, status: 'PERMISSION_DENIED', message: 'Google Calendar API has not been used in project 123 before or it is disabled.', details: [{ reason: 'SERVICE_DISABLED' }] } });
+    const e = explainGoogleError(403, body, cal);
+    expect(e).toBeInstanceOf(GoogleAccessError);
+    expect(e.fatal).toBe(true);
+    expect(e.message).toMatch(/Google Calendar API is not enabled/);
+  });
+
+  it('says when the permission was not granted at sign-in', () => {
+    const body = JSON.stringify({ error: { code: 403, status: 'PERMISSION_DENIED', message: 'Request had insufficient authentication scopes.', details: [{ reason: 'ACCESS_TOKEN_SCOPE_INSUFFICIENT' }] } });
+    expect(explainGoogleError(403, body, cal).message).toMatch(/Google Calendar access was not granted/);
+  });
+
+  it('keeps other errors non-fatal', () => {
+    const e = explainGoogleError(500, 'oops', cal);
+    expect(e.fatal).toBeUndefined();
+  });
+
+  it('reads which services were granted', () => {
+    expect(grantedServices('openid https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly')).toEqual({
+      mail: true,
+      docs: false,
+      calendar: true,
+    });
+    expect(grantedServices(undefined)).toBeNull();
+  });
+});

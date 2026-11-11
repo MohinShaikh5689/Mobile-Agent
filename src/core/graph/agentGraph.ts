@@ -10,7 +10,7 @@ import type { RouteDecision } from '../router';
 import { needsContext } from '../memory';
 import { extractKeywords, routeRequest } from '../router';
 import type { Services } from '../services';
-import { isoDate, readTools, specialistTools } from '../specialists';
+import { calendarTools, formatItems, isoDate, readTools, specialistTools } from '../specialists';
 import type { ScoredItem, Source } from '../types';
 import type { Coverage } from '../watermark';
 
@@ -85,6 +85,7 @@ export interface GraphDeps {
 /** The grader may rewrite the query this many times before answering with what it has. */
 export const MAX_REWRITES = 1;
 export const MAX_PLAN_STEPS = 3;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 const SERVICE_NAME: Record<Source, string> = { mail: 'Gmail', docs: 'Google Drive', calendar: 'Google Calendar' };
 
@@ -160,18 +161,71 @@ export function buildAgentGraph(deps: GraphDeps, checkpointer?: BaseCheckpointSa
   /** Exact lookup: one specialist with its own service's tools. */
   async function specialist(state: AgentStateType, config: LangGraphRunnableConfig): Promise<Update> {
     const source = state.route?.services[0] ?? 'mail';
+    if (source === 'calendar') return calendarLookup(state, config);
     const res = await runToolLoop({
       model: deps.model,
       system:
         `You answer questions about the user's ${SERVICE_NAME[source]}. ${dateContext(deps.now())}${windowHint(state.route)} ` +
-        'Use the tools to look things up; never guess. Answer in a few short sentences or a short list, with dates and names.',
+        'You have read access through the tools. Use them to look things up; never guess, and never say you lack access. ' +
+        'Answer in a few short sentences or a short list, with dates and names.',
       user: userPrompt(state),
       tools: specialistTools(source, deps.services),
       maxSteps: deps.maxSteps,
+      // Exact lookups need data: never let the model answer before it has looked.
+      requireToolFirst: true,
       onStep: stepper(config),
     });
     return { answer: res.answer, steps: res.steps };
   }
+
+  /**
+   * Calendar questions are a date-range filter, so the code fetches the events itself; the model
+   * only writes the answer (and may open one event for details). A small model left to decide
+   * sometimes answers "I don't have access to your calendar" without looking.
+   */
+  async function calendarLookup(state: AgentStateType, config: LangGraphRunnableConfig): Promise<Update> {
+    const now = deps.now();
+    const w = state.route?.window;
+    // No time named ("any upcoming events?"): the next 7 days.
+    const window = { start: w?.start ?? now, end: w?.end ?? now + 7 * DAY_MS };
+    if (window.end <= window.start) window.end = window.start + DAY_MS;
+    const args = { start: isoDate(window.start), end: isoDate(window.end - 1) };
+    const onStep = stepper(config);
+    let listing: string;
+    try {
+      const items = await deps.services.calendar.listEvents({ window, max: 25 });
+      listing = formatItems(items, 160);
+      const step: TraceStep = { kind: 'tool', name: 'list_events', args, ok: true, output: asData('calendar', listing) };
+      onStep(step);
+      if (items.length === 0) {
+        return {
+          answer: `Nothing on your calendar from ${args.start} to ${args.end}.`,
+          steps: [step],
+        };
+      }
+      const res = await runToolLoop({
+        model: deps.model,
+        system:
+          `You answer questions about the user's Google Calendar. ${dateContext(now)} ` +
+          `Below are the user's events from ${args.start} to ${args.end}, fetched from their calendar. Answer from them ` +
+          'in a short list with day, time and title. Call read_event only if the user asks about one event\'s details.',
+        user: `${asData('calendar events', listing)}\n\n${userPrompt(state)}`,
+        tools: [calendarTools(deps.services).read],
+        maxSteps: Math.min(deps.maxSteps ?? 5, 3),
+        onStep,
+      });
+      return { answer: res.answer, steps: [step, ...res.steps] };
+    } catch (e) {
+      const message = (e as Error).message;
+      const step: TraceStep = { kind: 'tool', name: 'list_events', args, ok: false, output: message };
+      onStep(step);
+      return {
+        answer: (e as { fatal?: boolean }).fatal ? message : `I couldn't read your calendar: ${message}`,
+        steps: [step],
+      };
+    }
+  }
+
 
   /** Hybrid retrieval with the watermark rule. */
   async function retrieve(state: AgentStateType): Promise<Update> {
@@ -243,6 +297,9 @@ export function buildAgentGraph(deps: GraphDeps, checkpointer?: BaseCheckpointSa
   async function answer(state: AgentStateType, config: LangGraphRunnableConfig): Promise<Update> {
     const r = state.route as RouteDecision;
     if (state.retrieved.length === 0) {
+      // A permission or sign-in problem is the real answer: say it, with its fix.
+      const fatal = [...new Set(state.retrieval.filter((t) => t.fatal && t.error).map((t) => t.error as string))];
+      if (fatal.length) return { answer: fatal.join('\n\n') };
       const where = r.services.map((s) => SERVICE_NAME[s]).join(' or ');
       return { answer: `I couldn't find anything about that in ${where}${r.windowPhrase ? ` for ${r.windowPhrase}` : ''}.` };
     }
@@ -326,6 +383,7 @@ export function buildAgentGraph(deps: GraphDeps, checkpointer?: BaseCheckpointSa
       user: `${step.task}${earlier}`,
       tools: specialistTools(step.service, deps.services),
       maxSteps: deps.maxSteps,
+      requireToolFirst: true,
       onStep: stepper(config),
     });
     return {

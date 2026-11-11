@@ -1,4 +1,12 @@
-export class AuthError extends Error {}
+/**
+ * Errors the agent cannot work around: retrying or rephrasing will not help, so the tool loop
+ * stops and shows the message to the user as is (instead of the model paraphrasing it as
+ * "I don't have access").
+ */
+export class AuthError extends Error {
+  readonly fatal = true;
+}
+
 export class GoogleApiError extends Error {
   constructor(
     message: string,
@@ -6,6 +14,51 @@ export class GoogleApiError extends Error {
   ) {
     super(message);
   }
+}
+
+/** A permission problem with a clear fix: the API is off in the Cloud project, or the scope was not granted. */
+export class GoogleAccessError extends GoogleApiError {
+  readonly fatal = true;
+}
+
+const API_NAMES: Record<string, string> = {
+  'gmail.googleapis.com': 'Gmail',
+  'www.googleapis.com/drive': 'Google Drive',
+  'www.googleapis.com/calendar': 'Google Calendar',
+};
+
+function apiName(url: string): string {
+  for (const [k, v] of Object.entries(API_NAMES)) if (url.includes(k)) return v;
+  return 'Google';
+}
+
+/** Reads Google's JSON error body and turns the common 403s into a message that says what to do. */
+export function explainGoogleError(status: number, body: string, url: string): GoogleApiError {
+  const name = apiName(url);
+  let reason = '';
+  let message = body.slice(0, 200);
+  try {
+    const e = (JSON.parse(body) as { error?: { message?: string; status?: string; errors?: { reason?: string }[]; details?: { reason?: string }[] } }).error;
+    reason = [e?.status, ...(e?.errors ?? []).map((x) => x.reason), ...(e?.details ?? []).map((x) => x.reason)]
+      .filter(Boolean)
+      .join(' ');
+    message = e?.message ?? message;
+  } catch {
+    // not JSON
+  }
+  if (status === 403 && /SERVICE_DISABLED|accessNotConfigured|has not been used|is disabled/i.test(`${reason} ${message}`)) {
+    return new GoogleAccessError(
+      `The ${name} API is not enabled in your Google Cloud project. Enable it under APIs & Services → Library, wait a minute, then try again.`,
+      status,
+    );
+  }
+  if (status === 403 && /ACCESS_TOKEN_SCOPE_INSUFFICIENT|insufficientPermissions|insufficient authentication scopes/i.test(`${reason} ${message}`)) {
+    return new GoogleAccessError(
+      `${name} access was not granted when you signed in. In Settings, sign out, sign in again, and tick the ${name} box on Google's permission screen.`,
+      status,
+    );
+  }
+  return new GoogleApiError(`${name} API error ${status}: ${message}`, status);
 }
 
 export type TokenProvider = () => Promise<string>;
@@ -33,7 +86,7 @@ export async function googleFetch<T>(
     }
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      throw new GoogleApiError(`Google API ${res.status}: ${text.slice(0, 200)}`, res.status);
+      throw explainGoogleError(res.status, text, url);
     }
     return (opts.asText ? await res.text() : await res.json()) as T;
   }

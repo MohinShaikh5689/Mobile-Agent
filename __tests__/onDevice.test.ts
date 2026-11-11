@@ -155,3 +155,40 @@ describe('model catalog', () => {
     }
   });
 });
+
+describe('load progress', () => {
+  it('ends at 100 and ignores native progress events that arrive after loading finished', async () => {
+    let late: ((p: number) => void) | undefined;
+    const init: InitFn = async (_params, onProgress) => {
+      onProgress?.(40);
+      late = onProgress; // native events can be delivered after init resolves
+      return { completion: async () => ({ text: 'ok', content: 'ok' }), embedding: async () => ({ embedding: [1] }), release: async () => undefined };
+    };
+    const events: number[] = [];
+    const m = new OnDeviceModel(cfg, init, (_which, p) => events.push(p));
+    await m.chat([{ role: 'user', content: 'x' }]);
+    late?.(97);
+    expect(events).toEqual([40, 100]);
+  });
+
+  it('waits for a running completion before freeing memory', async () => {
+    const order: string[] = [];
+    const init: InitFn = async () => ({
+      completion: async () => {
+        await new Promise((r) => setTimeout(r, 20));
+        order.push('completion done');
+        return { text: 'ok', content: 'ok' };
+      },
+      embedding: async () => ({ embedding: [1] }),
+      release: async () => {
+        order.push('released');
+      },
+    });
+    const m = new OnDeviceModel(cfg, init);
+    const answer = m.chat([{ role: 'user', content: 'x' }]);
+    await new Promise((r) => setTimeout(r, 5));
+    await m.release();
+    await answer;
+    expect(order).toEqual(['completion done', 'released']);
+  });
+});

@@ -5,18 +5,14 @@ import * as WebBrowser from 'expo-web-browser';
 import { useCallback, useEffect, useState } from 'react';
 import { Platform } from 'react-native';
 import { AuthError } from './http';
+import type { Source } from '../core/types';
 import { iosRedirectUri } from './oauthIds';
+import { grantedServices, SERVICE_SCOPES } from './scopes';
 
 WebBrowser.maybeCompleteAuthSession();
 
 /** OAuth scopes start read-only and widen only when write actions are built (Safety and approvals). */
-export const SCOPES = [
-  'openid',
-  'email',
-  'https://www.googleapis.com/auth/gmail.readonly',
-  'https://www.googleapis.com/auth/drive.readonly',
-  'https://www.googleapis.com/auth/calendar.readonly',
-];
+export const SCOPES = ['openid', 'email', SERVICE_SCOPES.mail, SERVICE_SCOPES.docs, SERVICE_SCOPES.calendar];
 
 const KEY = 'google.tokens';
 
@@ -25,6 +21,8 @@ interface StoredTokens {
   refreshToken?: string;
   /** Epoch ms. */
   expiresAt: number;
+  /** Space-separated scopes Google granted (the user can untick some on the consent screen). */
+  scope?: string;
 }
 
 const CLIENT_IDS = {
@@ -74,6 +72,7 @@ export async function getAccessToken(): Promise<string> {
         accessToken: res.accessToken,
         refreshToken: res.refreshToken ?? t.refreshToken,
         expiresAt: Date.now() + (res.expiresIn ?? 3600) * 1000,
+        scope: res.scope ?? t.scope,
       });
       return res.accessToken;
     } catch {
@@ -101,8 +100,13 @@ export function useGoogleSignIn() {
     extraParams: { access_type: 'offline', prompt: 'consent' },
   });
 
+  const [granted, setGranted] = useState<Record<Source, boolean> | null>(null);
+
   useEffect(() => {
-    load().then((t) => setSignedIn(Boolean(t)));
+    load().then((t) => {
+      setSignedIn(Boolean(t));
+      setGranted(grantedServices(t?.scope));
+    });
   }, []);
 
   useEffect(() => {
@@ -112,8 +116,10 @@ export function useGoogleSignIn() {
         accessToken: a.accessToken,
         refreshToken: a.refreshToken,
         expiresAt: Date.now() + (a.expiresIn ?? 3600) * 1000,
+        scope: a.scope,
       }).then(() => {
         setSignedIn(true);
+        setGranted(grantedServices(a.scope));
         setError(null);
       });
     } else if (response?.type === 'error') {
@@ -125,7 +131,8 @@ export function useGoogleSignIn() {
   const doSignOut = useCallback(async () => {
     await signOut();
     setSignedIn(false);
+    setGranted(null);
   }, []);
 
-  return { ready: Boolean(request) && clientIdsConfigured(), signedIn, error, signIn, signOut: doSignOut };
+  return { ready: Boolean(request) && clientIdsConfigured(), signedIn, granted, error, signIn, signOut: doSignOut };
 }

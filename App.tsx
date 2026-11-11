@@ -47,9 +47,10 @@ export default function App() {
     onModelLoadProgress((which, p) => {
       setLoadStatus(p >= 100 ? null : `Loading ${which === 'chat' ? 'chat' : 'embedding'} model ${Math.round(p)}%`);
     });
-    // iOS ends memory-heavy apps in the background first: let go of the model weights there.
-    const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'background') releaseModelMemory();
+    // Keep the model loaded across app switches (reloading takes seconds); free it only when the
+    // OS warns that memory is low, so iOS is less likely to end the app.
+    const sub = AppState.addEventListener('memoryWarning', () => {
+      releaseModelMemory();
     });
     return () => {
       onModelLoadProgress(null);

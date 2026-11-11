@@ -30,8 +30,13 @@ export interface ChatResult {
   toolCalls: ToolCall[];
 }
 
+export interface ChatOptions {
+  /** 'required' makes the model call one of the tools instead of answering in text. */
+  toolChoice?: 'auto' | 'required';
+}
+
 export interface ChatModel {
-  chat(messages: ChatMessage[], tools?: ToolSpec[]): Promise<ChatResult>;
+  chat(messages: ChatMessage[], tools?: ToolSpec[], opts?: ChatOptions): Promise<ChatResult>;
   /**
    * Output constrained to a JSON schema (grammar-constrained where the runtime allows it).
    * Optional: askJson() falls back to parsing plain chat output.
