@@ -188,6 +188,13 @@ export function formatContext(n: number): string {
   return `${Math.round(n / 1024)}K`;
 }
 
+/** A chat model imported from a .gguf file on the phone (no download link). */
+export function importedChatModel(fileName: string, name?: string): ModelSpec {
+  if (!fileName.toLowerCase().endsWith('.gguf')) throw new Error('Pick a .gguf file.');
+  const base = customChatModel(name ?? '', `https://imported.local/${encodeURIComponent(fileName)}`);
+  return { ...base, url: '', name: name?.trim() || fileName, notes: 'Imported from a file. Tool calling depends on the model.' };
+}
+
 /** Runtime overhead beyond weights and KV cache: compute buffers, Metal/CPU scratch, the app itself. */
 const OVERHEAD = 450 * MB;
 

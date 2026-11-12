@@ -11,6 +11,7 @@ import {
   allModels,
   contextOptions,
   customChatModel,
+  importedChatModel,
   effectiveContext,
   estimateMemory,
   formatBytes,
@@ -24,7 +25,18 @@ import type { SyncProgress } from '../google/sync';
 import { loadCoverage } from '../google/sync';
 import type { DownloadHandle } from '../llm/modelStore';
 import { deviceName, totalRam } from '../llm/device';
-import { deleteModel, downloadedSize, downloadModel, isDownloaded } from '../llm/modelStore';
+import type { DownloadStatus } from '../core/download';
+import { describeStatus, DownloadCancelled } from '../core/download';
+import {
+  deleteModel,
+  discardPartial,
+  downloadedSize,
+  downloadModel,
+  importModelFile,
+  isDownloaded,
+  partialBytes,
+  pickModelFile,
+} from '../llm/modelStore';
 import type { Settings } from '../storage/settings';
 import type { Theme } from './theme';
 import { useTheme } from './theme';
@@ -92,7 +104,11 @@ function ModelsCard({ settings, onSave, onModelsChanged, t }: {
   onModelsChanged: () => void;
   t: Theme;
 }) {
-  const [progress, setProgress] = useState<Record<string, number>>({});
+  /** Latest download status per model (kept after a pause or failure, to show where it stopped). */
+  const [status, setStatus] = useState<Record<string, DownloadStatus>>({});
+  const [active, setActive] = useState<Record<string, boolean>>({});
+  const [partials, setPartials] = useState<Record<string, number>>({});
+  const [importing, setImporting] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [sizes, setSizes] = useState<Record<string, number>>({});
   const [editingUrl, setEditingUrl] = useState<string | null>(null);
@@ -106,7 +122,10 @@ function ModelsCard({ settings, onSave, onModelsChanged, t }: {
   const recommended = recommendedChatModel(ram);
   const models = allModels(settings.customModels);
 
-  const refresh = () => setSizes(Object.fromEntries(models.map((m) => [m.id, isDownloaded(m) ? downloadedSize(m) : 0])));
+  const refresh = () => {
+    setSizes(Object.fromEntries(models.map((m) => [m.id, isDownloaded(m) ? downloadedSize(m) : 0])));
+    setPartials(Object.fromEntries(models.map((m) => [m.id, partialBytes(m)])));
+  };
   useEffect(refresh, [settings.customModels.length]);
 
   const urlFor = (m: ModelSpec) => settings.modelUrls[m.id] ?? m.url;
@@ -120,23 +139,82 @@ function ModelsCard({ settings, onSave, onModelsChanged, t }: {
 
   const start = (m: ModelSpec) => {
     setErrors((e) => ({ ...e, [m.id]: '' }));
-    setProgress((p) => ({ ...p, [m.id]: 0 }));
-    const h = downloadModel(m, urlFor(m), (f) => setProgress((p) => ({ ...p, [m.id]: f })));
+    setActive((a) => ({ ...a, [m.id]: true }));
+    const h = downloadModel(m, urlFor(m), (st) => setStatus((x) => ({ ...x, [m.id]: st })));
     handles.current[m.id] = h;
     h.done
       .then(() => {
         refresh();
         onModelsChanged();
       })
-      .catch((e: Error) => setErrors((x) => ({ ...x, [m.id]: e.message })))
+      .catch((e: Error) => {
+        // A pause keeps its status line ("Paused at …"); anything else is shown as an error.
+        if (!(e instanceof DownloadCancelled)) setErrors((x) => ({ ...x, [m.id]: e.message }));
+      })
       .finally(() => {
         delete handles.current[m.id];
-        setProgress((p) => {
-          const { [m.id]: _, ...rest } = p;
-          return rest;
-        });
+        setActive((a) => ({ ...a, [m.id]: false }));
+        refresh();
       });
   };
+
+  /** Import a .gguf from the Files app into a model's slot. */
+  const importInto = async (m: ModelSpec) => {
+    setErrors((e) => ({ ...e, [m.id]: '' }));
+    try {
+      const picked = await pickModelFile();
+      if (!picked) return;
+      setImporting(m.id);
+      await importModelFile(m, picked);
+      setStatus((x) => {
+        const { [m.id]: _, ...rest } = x;
+        return rest;
+      });
+      refresh();
+      onModelsChanged();
+    } catch (e) {
+      setErrors((x) => ({ ...x, [m.id]: (e as Error).message }));
+    } finally {
+      setImporting(null);
+    }
+  };
+
+  /** Import any .gguf as a new chat model. */
+  const importNew = async () => {
+    setAddError(null);
+    try {
+      const picked = await pickModelFile();
+      if (!picked) return;
+      const spec = importedChatModel(picked.name);
+      setImporting('new');
+      await importModelFile(spec, picked);
+      const customModels = [...settings.customModels.filter((c) => c.id !== spec.id), spec];
+      onSave({ ...settings, customModels, chatModel: spec.id });
+      refresh();
+      onModelsChanged();
+    } catch (e) {
+      setAddError((e as Error).message);
+    } finally {
+      setImporting(null);
+    }
+  };
+
+  const discard = (m: ModelSpec) =>
+    Alert.alert('Discard the partial download?', `${formatBytes(partials[m.id] ?? 0)} will be deleted.`, [
+      { text: 'Keep', style: 'cancel' },
+      {
+        text: 'Discard',
+        style: 'destructive',
+        onPress: () => {
+          discardPartial(m);
+          setStatus((x) => {
+            const { [m.id]: _, ...rest } = x;
+            return rest;
+          });
+          refresh();
+        },
+      },
+    ]);
 
   const confirmDownload = (m: ModelSpec) => {
     const fit = fitOf(m);
@@ -207,7 +285,9 @@ function ModelsCard({ settings, onSave, onModelsChanged, t }: {
             <Text style={{ color: t.text, fontWeight: '600', marginTop: 4 }}>{g.title}</Text>
             {g.items.map((m) => {
               const selected = m.role === 'chat' ? settings.chatModel === m.id : settings.embedModel === m.id;
-              const p = progress[m.id];
+              const st = status[m.id];
+              const isActive = Boolean(active[m.id]);
+              const partial = partials[m.id] ?? 0;
               const downloaded = (sizes[m.id] ?? 0) > 0;
               const fit = fitOf(m);
               const size = sizes[m.id] || m.sizeBytes;
@@ -264,12 +344,29 @@ function ModelsCard({ settings, onSave, onModelsChanged, t }: {
                       </Text>
                     </View>
                   )}
+                  {(isActive || (st && st.phase !== 'done')) && !downloaded && (
+                    <View style={{ gap: 4 }}>
+                      <View style={[styles.bar, { backgroundColor: t.bg, borderColor: t.border }]}>
+                        <View
+                          style={{
+                            width: `${st?.total ? Math.min(100, (st.bytes / st.total) * 100) : 0}%`,
+                            height: '100%',
+                            backgroundColor: st?.phase === 'failed' || st?.phase === 'retrying' ? t.error : t.accent,
+                          }}
+                        />
+                      </View>
+                      {st && (
+                        <Text style={{ color: st.phase === 'failed' ? t.error : t.muted, fontSize: 12 }}>
+                          {describeStatus(st)}
+                        </Text>
+                      )}
+                    </View>
+                  )}
                   <View style={[styles.row, { alignItems: 'center' }]}>
-                    {p !== undefined ? (
-                      <>
-                        <Text style={{ color: t.muted }}>Downloading {Math.round(p * 100)}%</Text>
-                        <Button label="Cancel" onPress={() => handles.current[m.id]?.cancel()} t={t} kind="secondary" />
-                      </>
+                    {isActive ? (
+                      <Button label="Pause" onPress={() => handles.current[m.id]?.pause()} t={t} kind="secondary" />
+                    ) : importing === m.id ? (
+                      <Text style={{ color: t.muted }}>Importing…</Text>
                     ) : downloaded ? (
                       <>
                         <Text style={{ color: t.accent }}>Downloaded</Text>
@@ -277,7 +374,15 @@ function ModelsCard({ settings, onSave, onModelsChanged, t }: {
                       </>
                     ) : (
                       <>
-                        <Button label="Download" onPress={() => confirmDownload(m)} t={t} />
+                        {urlFor(m) ? (
+                          <Button
+                            label={partial > 0 ? `Resume (${formatBytes(partial)} done)` : 'Download'}
+                            onPress={() => (partial > 0 ? start(m) : confirmDownload(m))}
+                            t={t}
+                          />
+                        ) : null}
+                        {partial > 0 && <Button label="Discard" onPress={() => discard(m)} t={t} kind="secondary" />}
+                        <Button label="Import file" onPress={() => importInto(m)} t={t} kind="secondary" />
                         <Button
                           label="Edit URL"
                           onPress={() => setEditingUrl(editingUrl === m.id ? null : m.id)}
@@ -288,6 +393,11 @@ function ModelsCard({ settings, onSave, onModelsChanged, t }: {
                       </>
                     )}
                   </View>
+                  {isActive && (
+                    <Text style={{ color: t.muted, fontSize: 11 }}>
+                      Keep the app open; the screen stays on. If the connection drops, it retries and keeps what it has.
+                    </Text>
+                  )}
                   {editingUrl === m.id && (
                     <Field
                       label="Download URL"
@@ -321,7 +431,19 @@ function ModelsCard({ settings, onSave, onModelsChanged, t }: {
           </View>
         </View>
       ) : (
-        <Button label="Add a model by link" onPress={() => setAdding(true)} t={t} kind="secondary" />
+        <>
+        <View style={styles.row}>
+          <Button label="Add a model by link" onPress={() => setAdding(true)} t={t} kind="secondary" />
+          <Button
+            label={importing === 'new' ? 'Importing…' : 'Import a .gguf file'}
+            onPress={importNew}
+            t={t}
+            kind="secondary"
+            disabled={importing !== null}
+          />
+        </View>
+        {addError && <Text style={{ color: t.error }}>{addError}</Text>}
+        </>
       )}
     </View>
   );
@@ -458,5 +580,6 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row', gap: 10, flexWrap: 'wrap' },
   button: { borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10 },
   model: { borderWidth: 1, borderRadius: 10, padding: 12, gap: 8 },
+  bar: { height: 8, borderRadius: 4, borderWidth: StyleSheet.hairlineWidth, overflow: 'hidden' },
   chip: { borderWidth: 1, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, alignItems: 'center', minWidth: 64 },
 });
