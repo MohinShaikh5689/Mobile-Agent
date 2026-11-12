@@ -7,12 +7,24 @@ import { Platform } from 'react-native';
 import { AuthError } from './http';
 import type { Source } from '../core/types';
 import { iosRedirectUri } from './oauthIds';
-import { grantedServices, SERVICE_SCOPES } from './scopes';
+import { grantedServices, grantedWrites, SERVICE_SCOPES, WRITE_SCOPES } from './scopes';
 
 WebBrowser.maybeCompleteAuthSession();
 
 /** OAuth scopes start read-only and widen only when write actions are built (Safety and approvals). */
-export const SCOPES = ['openid', 'email', SERVICE_SCOPES.mail, SERVICE_SCOPES.docs, SERVICE_SCOPES.calendar];
+/**
+ * Read scopes for lookups, plus the two write scopes used only after the user approves an action
+ * (Safety and approvals: scopes widened when write actions were built).
+ */
+export const SCOPES = [
+  'openid',
+  'email',
+  SERVICE_SCOPES.mail,
+  SERVICE_SCOPES.docs,
+  SERVICE_SCOPES.calendar,
+  WRITE_SCOPES.mail,
+  WRITE_SCOPES.calendar,
+];
 
 const KEY = 'google.tokens';
 
@@ -101,11 +113,13 @@ export function useGoogleSignIn() {
   });
 
   const [granted, setGranted] = useState<Record<Source, boolean> | null>(null);
+  const [writes, setWrites] = useState<{ mail: boolean; calendar: boolean } | null>(null);
 
   useEffect(() => {
     load().then((t) => {
       setSignedIn(Boolean(t));
       setGranted(grantedServices(t?.scope));
+      setWrites(grantedWrites(t?.scope));
     });
   }, []);
 
@@ -120,6 +134,7 @@ export function useGoogleSignIn() {
       }).then(() => {
         setSignedIn(true);
         setGranted(grantedServices(a.scope));
+        setWrites(grantedWrites(a.scope));
         setError(null);
       });
     } else if (response?.type === 'error') {
@@ -132,7 +147,8 @@ export function useGoogleSignIn() {
     await signOut();
     setSignedIn(false);
     setGranted(null);
+    setWrites(null);
   }, []);
 
-  return { ready: Boolean(request) && clientIdsConfigured(), signedIn, granted, error, signIn, signOut: doSignOut };
+  return { ready: Boolean(request) && clientIdsConfigured(), signedIn, granted, writes, error, signIn, signOut: doSignOut };
 }

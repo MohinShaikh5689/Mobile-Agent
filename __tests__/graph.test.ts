@@ -129,10 +129,11 @@ describe('agent graph', () => {
     expect(r.answer).toBe('One unread email.');
   });
 
-  it('action: no model call', async () => {
+  it('action without write access: says so, no model call', async () => {
     const { model, seen, jsonSeen } = scripted([]);
     const r = await makeAgent(model).ask('Draft a reply to Sam');
-    expect(r.path).toEqual(['contextualize', 'router', 'action']);
+    expect(r.path).toEqual(['contextualize', 'router', 'propose']);
+    expect(r.answer).toMatch(/Write access is not set up/);
     expect(seen.length + jsonSeen.length).toBe(0);
   });
 
@@ -177,7 +178,8 @@ describe('agent graph', () => {
       ],
       [{ steps: [{ service: 'calendar', task: 'find the 3pm meeting' }, { service: 'mail', task: 'find the attendees thread' }] }],
     );
-    const r = await makeAgent(model).ask('Reschedule my 3pm meeting and draft a note to the attendees');
+    const r = await makeAgent(model).ask("What's on my calendar tomorrow and then find the email from Sam about it");
+    expect(r.route.route).toBe('multi_step');
     expect(r.path).toEqual(['contextualize', 'router', 'planner', 'run_step', 'run_step', 'compose']);
     expect(r.plan.map((p) => p.service)).toEqual(['calendar', 'mail']);
     expect(seen[1]?.messages[1]?.content).toMatch(/Found so far/);

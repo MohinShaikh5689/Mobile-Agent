@@ -535,6 +535,21 @@ export function SettingsScreen({ settings, onSave, container, onModelsChanged }:
                 {google.granted?.[key] ? '✓' : '✗'} {label}
               </Text>
             ))}
+            {google.writes && (
+              <>
+                <Text style={{ color: google.writes.mail ? t.accent : t.muted }}>
+                  {google.writes.mail ? '✓' : '–'} Create drafts and send email (after you approve)
+                </Text>
+                <Text style={{ color: google.writes.calendar ? t.accent : t.muted }}>
+                  {google.writes.calendar ? '✓' : '–'} Create and change events (after you approve)
+                </Text>
+                {!(google.writes.mail && google.writes.calendar) && (
+                  <Text style={{ color: t.muted, fontSize: 12 }}>
+                    To let the assistant draft emails and add events, sign out and sign in again, and allow those boxes too.
+                  </Text>
+                )}
+              </>
+            )}
             {!(google.granted.mail && google.granted.docs && google.granted.calendar) && (
               <Text style={{ color: t.error, fontSize: 12 }}>
                 Some access was not granted. Sign out, sign in again, and tick every box on Google's permission screen.

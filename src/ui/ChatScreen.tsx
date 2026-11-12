@@ -17,6 +17,8 @@ import type { RetrievalTraceEntry } from '../core/retriever';
 import type { Route } from '../core/router';
 import { isoDate } from '../core/specialists';
 import type { Agent } from '../core/orchestrator';
+import type { ProposedAction } from '../core/actions';
+import { ActionCard } from './ActionCard';
 import { Markdown } from './Markdown';
 import type { Theme } from './theme';
 import { useTheme } from './theme';
@@ -26,6 +28,8 @@ interface Message {
   role: 'user' | 'agent' | 'error';
   text: string;
   result?: AgentAnswer;
+  /** A proposed write waiting for approval, shown as a card under this message. */
+  pending?: { threadId: string; action: ProposedAction };
 }
 
 const ROUTE_LABEL: Record<Route, string> = {
@@ -50,6 +54,7 @@ const EXAMPLES = [
   "What's on my calendar tomorrow?",
   'Any unread mail from today?',
   'Find the thread about the visa paperwork',
+  'Schedule a 30-minute call with Sam tomorrow at 3pm',
   'Explain how a VPN works, simply'
 ];
 
@@ -160,18 +165,56 @@ export function ChatScreen({ agent, unavailable, loadStatus }: {
   useEffect(() => {
     if (!agent) return;
     let cancelled = false;
-    agent.history().then((turns) => {
+    Promise.all([agent.history(), agent.pending()]).then(([turns, pending]) => {
       if (cancelled || turns.length === 0) return;
-      setMessages((current) =>
-        current.length
-          ? current
-          : turns.map((t, i) => ({ id: `h${t.at}-${i}`, role: t.role === 'user' ? 'user' : 'agent', text: t.text })),
-      );
+      setMessages((current) => {
+        if (current.length) return current;
+        const restored: Message[] = turns.map((t, i) => ({
+          id: `h${t.at}-${i}`,
+          role: t.role === 'user' ? 'user' : 'agent',
+          text: t.text,
+        }));
+        // A proposal still waiting for approval gets its card back on the last answer.
+        const last = restored[restored.length - 1];
+        if (pending && last?.role === 'agent') last.pending = pending;
+        return restored;
+      });
     });
     return () => {
       cancelled = true;
     };
   }, [agent]);
+
+  /** Approve (with the possibly edited action) or cancel (null) a proposed write. */
+  const decide = useCallback(
+    async (item: Message, action: ProposedAction | null) => {
+      if (!agent || !item.pending) return;
+      const { threadId } = item.pending;
+      setBusy(true);
+      setStatus(action ? 'Working…' : '');
+      try {
+        if (action) {
+          const result = await agent.approve(threadId, action);
+          setMessages((m) => [
+            ...m.map((x) => (x.id === item.id ? { ...x, pending: undefined } : x)),
+            { id: `${Date.now()}a`, role: 'agent', text: result.answer, result },
+          ]);
+        } else {
+          const text = await agent.cancel(threadId);
+          setMessages((m) => [
+            ...m.map((x) => (x.id === item.id ? { ...x, pending: undefined } : x)),
+            { id: `${Date.now()}c`, role: 'agent', text },
+          ]);
+        }
+      } catch (e) {
+        setMessages((m) => [...m, { id: `${Date.now()}e`, role: 'error', text: (e as Error).message }]);
+      } finally {
+        setBusy(false);
+        setStatus('');
+      }
+    },
+    [agent],
+  );
 
   const newChat = useCallback(async () => {
     if (busy) return;
@@ -206,7 +249,11 @@ export function ChatScreen({ agent, unavailable, loadStatus }: {
             if (e.text) setStatus('Writing…');
           }
         });
-        setMessages((m) => [...m, { id: `${Date.now()}a`, role: 'agent', text: result.answer, result }]);
+        setMessages((m) => [
+          // A new message replaces any older proposal that was neither approved nor cancelled.
+          ...m.map((x) => (x.pending ? { ...x, pending: undefined } : x)),
+          { id: `${Date.now()}a`, role: 'agent', text: result.answer, result, pending: result.pending },
+        ]);
       } catch (e) {
         setMessages((m) => [...m, { id: `${Date.now()}e`, role: 'error', text: (e as Error).message }]);
       } finally {
@@ -281,6 +328,14 @@ export function ChatScreen({ agent, unavailable, loadStatus }: {
               <Text style={{ color: item.role === 'error' ? t.error : t.text, fontSize: 15, lineHeight: 21 }} selectable>
                 {item.text}
               </Text>
+            )}
+            {item.pending && (
+              <ActionCard
+                action={item.pending.action}
+                t={t}
+                onApprove={(action) => decide(item, action)}
+                onCancel={() => decide(item, null)}
+              />
             )}
             {item.result && <Details result={item.result} t={t} />}
           </View>

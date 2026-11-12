@@ -11,7 +11,25 @@ What is built:
 - **Hybrid retriever:** a local index on the phone answers for older mail and docs. Anything newer is fetched live. Both sets are merged and reranked together.
 - **Incremental sync:** uses Gmail history IDs and the Drive changes feed.
 - **Tool loop:** has a step limit and an error path for every tool error. Untrusted content is always wrapped as data.
-- **Write actions are not built yet.** Requests to draft, send or invite get an explanation instead of an action.
+- **Write actions with approval:** drafts, sending, and creating or moving events, each shown as a card you approve, edit or cancel.
+
+## Write actions (with approval)
+
+The assistant can **draft or send email** and **create or move calendar events**. Nothing is written until you approve it:
+
+1. **The request becomes a proposal.** "Reply to that email saying I'll send it Friday" or "Move my 3pm to 4pm" goes to a `propose` step. The model fills in the fields, and code checks them:
+   - addresses are real, and names are looked up among people who have emailed you,
+   - dates and times parse,
+   - an event being changed is one of your real upcoming events.
+
+   If something is missing, the assistant asks instead of guessing.
+2. **A card shows exactly what will happen:** recipients, subject and body, or the event's time before and after. You can **Edit** it, tap the action button (*Save draft*, *Send email*, *Create event*, *Update event*), or **Cancel**.
+3. **The graph pauses.** It stops before its `execute` step (a LangGraph `interruptBefore` breakpoint), and the pause is saved to the on-device checkpoint. A proposal survives closing the app; its card comes back on reopen.
+4. **On approval, `execute` runs.** It receives only the structured fields, never raw email text. It re-fetches the email being replied to, or the event being moved, right before writing.
+
+Drafts are the default for email: "draft", "write" and "reply" save a Gmail draft, and only "send" sends. Cancelling, declining and deleting are not supported yet.
+
+**Setup:** in Google Cloud, add the scopes `https://www.googleapis.com/auth/gmail.compose` and `https://www.googleapis.com/auth/calendar.events` under *Google Auth Platform → Data access*. Then sign out and sign in again in the app and allow the new permissions. Settings shows which permissions Google granted.
 
 ## General conversation
 
@@ -203,6 +221,5 @@ The core and the graph are tested with fakes: a bag-of-words embedder, a scripte
 | --- | --- |
 | 2 | Background sync while idle or charging (`expo-background-task`). Sync is manual for now. |
 | 3 | The eval set (at least 30 tasks, including injection cases) with route accuracy. The graph itself is built. |
-| 4 | Write actions: drafts and event changes behind an approval gate (an `interruptBefore` breakpoint) that shows exactly what will happen. Re-fetch by ID before acting. |
 | 5 | An MCP server per service, tracing, and a four-model comparison. |
 | Phone | Measured memory and speed on target devices, and a 1.7B fallback for phones with less RAM. |

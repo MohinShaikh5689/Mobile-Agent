@@ -21,3 +21,16 @@ export function grantedServices(scope: string | undefined): Record<Source, boole
     calendar: granted.has(SERVICE_SCOPES.calendar),
   };
 }
+
+/** Write scopes, for approved actions only (drafts/sending, creating/changing events). */
+export const WRITE_SCOPES = {
+  mail: 'https://www.googleapis.com/auth/gmail.compose',
+  calendar: 'https://www.googleapis.com/auth/calendar.events',
+};
+
+/** Which write permissions were granted; null when Google did not report scopes. */
+export function grantedWrites(scope: string | undefined): { mail: boolean; calendar: boolean } | null {
+  if (!scope) return null;
+  const granted = new Set(scope.split(/\s+/));
+  return { mail: granted.has(WRITE_SCOPES.mail), calendar: granted.has(WRITE_SCOPES.calendar) };
+}

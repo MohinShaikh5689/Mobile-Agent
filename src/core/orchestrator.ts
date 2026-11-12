@@ -1,4 +1,6 @@
 import type { BaseCheckpointSaver } from '@langchain/langgraph/web';
+import { MemorySaver } from '@langchain/langgraph/web';
+import type { ProposedAction } from './actions';
 import type { TraceStep } from './agent';
 import type { AgentGraph, AgentStateType, PlanStep } from './graph/agentGraph';
 import { buildAgentGraph } from './graph/agentGraph';
@@ -35,6 +37,8 @@ export interface AgentAnswer {
   question: string;
   /** The question as the graph understood it (follow-ups rewritten to stand alone). */
   standalone: string;
+  /** A write waiting for the user's approval; the graph is paused before `execute`. */
+  pending?: { threadId: string; action: ProposedAction };
 }
 
 export interface AgentDeps {
@@ -42,6 +46,7 @@ export interface AgentDeps {
   retriever: HybridRetriever;
   services: Services;
   loadCoverage: () => Promise<Partial<Record<Source, Coverage>>>;
+  /** Saves graph state at every step; needed to pause for approval (in memory if not given). */
   checkpointer?: BaseCheckpointSaver;
   /** Where the list of recent threads is kept, so old checkpoints can be pruned. */
   kv?: KeyValueStore;
@@ -55,11 +60,13 @@ export interface AgentDeps {
 }
 
 const THREADS_KEY = 'agent.threads';
+const DATA_ROUTES = new Set(['structured', 'fuzzy', 'multi_step']);
 
 /** Runs one question through the LangGraph graph and reports progress as it goes. */
 export class Agent {
   readonly graph: AgentGraph;
   private clock: Clock;
+  private checkpointer: BaseCheckpointSaver;
   private listeners = new Map<string, (step: TraceStep) => void>();
   private partialListeners = new Map<string, (text: string) => void>();
   /** Conversation memory; present when the agent has a key-value store. */
@@ -70,6 +77,7 @@ export class Agent {
   constructor(private deps: AgentDeps) {
     this.clock = deps.clock ?? systemClock;
     this.conversations = deps.kv ? new ConversationStore(deps.kv) : null;
+    this.checkpointer = deps.checkpointer ?? new MemorySaver();
     this.graph = buildAgentGraph(
       {
         model: deps.model,
@@ -81,7 +89,7 @@ export class Agent {
         onStep: (threadId, step) => this.listeners.get(threadId)?.(step),
         onPartial: (threadId, text) => this.partialListeners.get(threadId)?.(text),
       },
-      deps.checkpointer,
+      this.checkpointer,
     );
   }
 
@@ -96,6 +104,13 @@ export class Agent {
     return (await this.conversations.current(this.clock.now())).turns;
   }
 
+  /** A proposed write still waiting for approval in the open conversation, if any. */
+  async pending(): Promise<Conversation['pending'] | undefined> {
+    if (!this.conversations) return undefined;
+    await this.compacting;
+    return (await this.conversations.current(this.clock.now())).pending;
+  }
+
   /** Forgets the current conversation and starts a new one. */
   async newConversation(): Promise<void> {
     await this.compacting;
@@ -105,19 +120,63 @@ export class Agent {
   async ask(question: string, onEvent?: (e: AgentEvent) => void): Promise<AgentAnswer> {
     await this.compacting;
     const conv = this.conversations ? await this.conversations.current(this.clock.now()) : null;
+    // A new message replaces any proposal still waiting: it was neither approved nor kept.
     const history = renderHistory(conv, this.budget);
-    const result = await this.run(question, history, onEvent);
-    if (conv) this.remember(conv, question, result);
+    const threadId = `run-${this.clock.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const result = await this.run(
+      { question, history, carry: conv?.lastServices ?? [], refs: conv?.refs ?? [] },
+      threadId,
+      question,
+      onEvent,
+    );
+    if (conv) this.remember(conv, { user: question, assistant: result.answer }, result);
     return result;
   }
 
+  /**
+   * Runs the action the user approved (optionally with their edits) by resuming the paused
+   * graph. Only the structured action reaches the execute step.
+   */
+  async approve(threadId: string, edited?: ProposedAction, onEvent?: (e: AgentEvent) => void): Promise<AgentAnswer> {
+    await this.compacting;
+    const config = { configurable: { thread_id: threadId } };
+    const snapshot = await this.graph.getState(config);
+    if (!snapshot.next.includes('execute')) throw new Error('This request is no longer waiting for approval.');
+    if (edited) await this.graph.updateState(config, { pendingAction: edited }, 'propose');
+    const values = snapshot.values as AgentStateType;
+    const result = await this.run(null, threadId, values.question, onEvent);
+    const conv = this.conversations ? await this.conversations.current(this.clock.now()) : null;
+    if (conv) this.remember(conv, { assistant: result.answer }, { ...result, pending: undefined });
+    return result;
+  }
+
+  /** Drops a proposed action: nothing is written. */
+  async cancel(threadId: string): Promise<string> {
+    await this.compacting;
+    const answer = 'Cancelled. Nothing was changed.';
+    const conv = this.conversations ? await this.conversations.current(this.clock.now()) : null;
+    if (conv) {
+      const now = this.clock.now();
+      const updated: Conversation = { ...conv, pending: undefined, turns: [...conv.turns, { role: 'assistant', text: answer, at: now }] };
+      await (this.conversations as ConversationStore).save(updated);
+    }
+    await this.checkpointer.deleteThread(threadId).catch(() => undefined);
+    return answer;
+  }
+
   /** Saves the turn now; compaction (a model call) finishes in the background. */
-  private remember(conv: Conversation, question: string, result: AgentAnswer): void {
+  private remember(conv: Conversation, turn: { user?: string; assistant: string }, result: AgentAnswer): void {
     const now = this.clock.now();
+    const turns = [...conv.turns];
+    if (turn.user) turns.push({ role: 'user', text: turn.user, at: now });
+    turns.push({ role: 'assistant', text: turn.assistant, at: now });
     const updated: Conversation = {
       ...conv,
-      turns: [...conv.turns, { role: 'user', text: question, at: now }, { role: 'assistant', text: result.answer, at: now }],
+      turns,
       refs: mergeRefs(extractRefs(result.sources, result.steps), conv.refs),
+      lastServices:
+        DATA_ROUTES.has(result.route.route) && result.route.services.length ? result.route.services : conv.lastServices,
+      pending: result.pending,
     };
     const store = this.conversations as ConversationStore;
     this.compacting = (async () => {
@@ -127,8 +186,13 @@ export class Agent {
     })().catch(() => undefined);
   }
 
-  private async run(question: string, history: string, onEvent?: (e: AgentEvent) => void): Promise<AgentAnswer> {
-    const threadId = `run-${this.clock.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  /** Runs the graph from a new input, or resumes a paused thread when input is null. */
+  private async run(
+    input: { question: string; history: string; carry: Source[]; refs: Conversation['refs'] } | null,
+    threadId: string,
+    question: string,
+    onEvent?: (e: AgentEvent) => void,
+  ): Promise<AgentAnswer> {
     const config = { configurable: { thread_id: threadId }, recursionLimit: this.deps.recursionLimit ?? 25 };
     const path: string[] = [];
     let last: Partial<AgentStateType> = {};
@@ -137,14 +201,16 @@ export class Agent {
     this.partialListeners.set(threadId, (text) => onEvent?.({ type: 'partial', text }));
     try {
       // 'updates' says which node just ran; 'values' carries the full state after it.
-      const stream = await this.graph.stream({ question, history }, { ...config, streamMode: ['updates', 'values'] });
+      const stream = await this.graph.stream(input, { ...config, streamMode: ['updates', 'values'] });
       for await (const chunk of stream) {
         const [mode, data] = chunk as [string, Record<string, unknown>];
         if (mode === 'values') {
-          last = data as Partial<AgentStateType>;
+          // At a pause LangGraph emits a final { __interrupt__: [] } "values" chunk: not the state.
+          if (!('__interrupt__' in data)) last = data as Partial<AgentStateType>;
           continue;
         }
         for (const [node, update] of Object.entries(data)) {
+          if (node.startsWith('__')) continue; // LangGraph's own markers, e.g. __interrupt__
           path.push(node);
           onEvent?.({ type: 'node', node });
           const u = update as Partial<AgentStateType>;
@@ -156,10 +222,11 @@ export class Agent {
       this.listeners.delete(threadId);
       this.partialListeners.delete(threadId);
     }
-    await this.rememberThread(threadId);
+    if (input) await this.rememberThread(threadId);
 
     const state = last as AgentStateType;
     if (!state.route) throw new Error('The agent graph ended without routing the question.');
+    const waiting = (await this.graph.getState(config)).next.includes('execute');
     return {
       answer: state.answer || 'I could not produce an answer.',
       route: state.route,
@@ -171,18 +238,20 @@ export class Agent {
       threadId,
       question,
       standalone: state.standalone || question,
+      ...(waiting && state.pendingAction ? { pending: { threadId, action: state.pendingAction } } : {}),
     };
   }
 
-  /** Keeps the newest threads' checkpoints and deletes the rest. */
+  /** Keeps the newest threads' checkpoints and deletes the rest (never one awaiting approval). */
   private async rememberThread(threadId: string): Promise<void> {
-    const { kv, checkpointer } = this.deps;
-    if (!kv || !checkpointer) return;
+    const { kv } = this.deps;
+    if (!kv) return;
     const keep = this.deps.keepThreads ?? 20;
     const raw = await kv.get(THREADS_KEY);
     const threads = [...(raw ? (JSON.parse(raw) as string[]) : []), threadId];
-    const drop = threads.slice(0, Math.max(0, threads.length - keep));
-    for (const t of drop) await checkpointer.deleteThread(t);
-    await kv.set(THREADS_KEY, JSON.stringify(threads.slice(drop.length)));
+    const pendingId = this.conversations ? (await this.conversations.current(this.clock.now())).pending?.threadId : undefined;
+    const drop = threads.slice(0, Math.max(0, threads.length - keep)).filter((t) => t !== pendingId);
+    for (const t of drop) await this.checkpointer.deleteThread(t);
+    await kv.set(THREADS_KEY, JSON.stringify(threads.filter((t) => !drop.includes(t))));
   }
 }

@@ -1,3 +1,4 @@
+import type { CreateEventAction, EmailAction, UpdateEventAction } from './actions';
 import type { Item, TimeWindow } from './types';
 
 /**
@@ -35,10 +36,30 @@ export interface CalendarService {
   readEvent(id: string): Promise<Item>;
 }
 
+export interface WriteResult {
+  id: string;
+  url?: string;
+}
+
+/**
+ * Write access, used only by the execute step after the user approved a proposed action.
+ * Requires the gmail.compose and calendar.events scopes.
+ */
+export interface WriteService {
+  /** Headers of a message being replied to, re-fetched right before writing. */
+  replyHeaders(messageId: string): Promise<{ threadId: string; messageId?: string; references?: string; subject: string }>;
+  createDraft(a: EmailAction, reply?: { threadId: string; messageId?: string; references?: string }): Promise<WriteResult>;
+  sendEmail(a: EmailAction, reply?: { threadId: string; messageId?: string; references?: string }): Promise<WriteResult>;
+  createEvent(a: CreateEventAction): Promise<WriteResult>;
+  updateEvent(a: UpdateEventAction): Promise<WriteResult>;
+}
+
 export interface Services {
   mail: MailService;
   docs: DocsService;
   calendar: CalendarService;
+  /** Absent when write access is not set up. */
+  write?: WriteService;
 }
 
 export interface KeyValueStore {

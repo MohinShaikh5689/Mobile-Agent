@@ -1,3 +1,4 @@
+import type { ProposedAction } from './actions';
 import type { TraceStep } from './agent';
 import type { ChatModel } from './llm/types';
 import type { KeyValueStore } from './services';
@@ -32,6 +33,10 @@ export interface Conversation {
   turns: Turn[];
   summary: string;
   refs: RefItem[];
+  /** Services of the last data question, so follow-ups without a service word stay on topic. */
+  lastServices?: Source[];
+  /** A proposed write waiting for approval (the paused graph thread and what it will do). */
+  pending?: { threadId: string; action: ProposedAction };
 }
 
 /** Rough token count for English text (about 3.5 characters per token). */

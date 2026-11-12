@@ -15,6 +15,9 @@ import type { Source, TimeWindow } from './types';
  */
 export type Route = 'structured' | 'fuzzy' | 'multi_step' | 'action' | 'general';
 
+/** Write actions the agent can propose (each needs the user's approval before it runs). */
+export type ActionKind = 'draft_email' | 'send_email' | 'create_event' | 'update_event';
+
 export interface RouteDecision {
   route: Route;
   services: Source[];
@@ -27,7 +30,30 @@ export interface RouteDecision {
   reason: string;
   /** Rules could not tell general from personal; the graph's classify step decides. */
   ambiguous?: boolean;
+  /** For write requests: which action. Undefined for writes the agent does not support. */
+  action?: ActionKind;
+  /** Docs/mail: the user wants a list of what is new, not a search by meaning. */
+  listing?: boolean;
 }
+
+/** Which write action a request asks for, by its verbs. */
+export function detectAction(q: string): ActionKind | undefined {
+  if (/\b(reschedul\w*|move|push|postpone|change the time)\b/.test(q) && /\b(meeting|event|call|appointment|it|that|\d{1,2}(:\d\d)?\s?(am|pm))\b/.test(q)) {
+    return 'update_event';
+  }
+  if (/\b(schedule|book|set up|invite|add (?:an? )?(?:event|meeting|call|reminder)|create (?:an? )?(?:event|meeting))\b/.test(q)) {
+    return 'create_event';
+  }
+  if (/\bsend\b/.test(q) && !/\b(draft|don't send|do not send)\b/.test(q)) return 'send_email';
+  if (/\b(draft|compose|write|reply|respond|forward|email|mail|note to|message)\b/.test(q)) return 'draft_email';
+  return undefined;
+}
+
+/** "What's new in Drive", "latest mail": a list sorted by date. */
+const LISTING = /\b(new|newest|latest|recent|recently|lately|changed|updated|modified|added)\b/;
+
+/** Short follow-ups and time phrases continue the previous topic ("and next week?", "see again"). */
+const CONTINUES = /\b(again|also|too|then|instead|next|previous|same|more|other|what about|how about|and)\b/;
 
 const SERVICE_PATTERNS: Record<Source, RegExp> = {
   mail: /\b(e-?mails?|mails?|inbox|messages?|sent|send|wrote|replied|reply|replies|threads?|unread|cc'?d|draft|note to|tell|notify)\b/,
@@ -96,13 +122,29 @@ export function detectServices(text: string): Source[] {
   return (Object.keys(SERVICE_PATTERNS) as Source[]).filter((s) => SERVICE_PATTERNS[s].test(q));
 }
 
-export function routeRequest(text: string, now: number): RouteDecision {
+export interface RouteOptions {
+  /** Services of the previous data question in this conversation, for follow-ups that name none. */
+  carry?: Source[];
+}
+
+export function routeRequest(text: string, now: number, opts: RouteOptions = {}): RouteDecision {
   const q = text.toLowerCase();
   const parsed = parseTimeWindow(q, now);
   const window = parsed?.window ?? null;
   const windowPhrase = parsed?.phrase ?? null;
   const keywords = extractKeywords(q, windowPhrase);
   let services = detectServices(q);
+  let carried = false;
+
+  // "See next week buddy" after a calendar question is still about the calendar.
+  if (services.length === 0 && opts.carry?.length && !SMALLTALK.test(q)) {
+    const words = q.split(/\s+/).filter(Boolean).length;
+    if (window || words <= 6 || CONTINUES.test(q)) {
+      services = [...opts.carry];
+      carried = true;
+    }
+  }
+  const via = carried ? ' (continues the previous topic)' : '';
 
   // "Did Sam reply to my email?" is a question, not a request to reply.
   const isQuestion = QUESTION_START.test(q) && !POLITE_REQUEST.test(q);
@@ -111,11 +153,14 @@ export function routeRequest(text: string, now: number): RouteDecision {
 
   const base = { window, windowPhrase, keywords };
 
-  if (isAction && (chained || services.length > 1)) {
-    return { route: 'multi_step', services, ...base, reason: 'write action combined with another step or service' };
-  }
   if (isAction) {
-    return { route: 'action', services, ...base, reason: 'asks for a write action' };
+    const action = detectAction(q);
+    const needed: Source[] = action === 'create_event' || action === 'update_event' ? ['calendar'] : action ? ['mail'] : [];
+    const all = [...new Set([...services, ...needed])];
+    if (chained || all.length > 1) {
+      return { route: 'multi_step', services: all, ...base, action, reason: 'write action combined with another step or service' };
+    }
+    return { route: 'action', services: all, ...base, action, reason: 'asks for a write action' };
   }
   if (services.length > 1 && chained) {
     return { route: 'multi_step', services, ...base, reason: 'chains steps across services' };
@@ -123,7 +168,12 @@ export function routeRequest(text: string, now: number): RouteDecision {
 
   // Calendar questions are always exact range lookups; the index does not hold calendar data.
   if (services.length === 1 && services[0] === 'calendar') {
-    return { route: 'structured', services, ...base, reason: 'calendar lookup is a range filter' };
+    return { route: 'structured', services, ...base, reason: `calendar lookup is a range filter${via}` };
+  }
+
+  // "Anything new in Drive?": newest files first, not a search by meaning.
+  if (services.length === 1 && services[0] === 'docs' && LISTING.test(q) && !FUZZY_PATTERN.test(q)) {
+    return { route: 'structured', services, ...base, listing: true, reason: `list of recently changed files${via}` };
   }
 
   const fuzzy = FUZZY_PATTERN.test(q);

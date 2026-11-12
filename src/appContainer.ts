@@ -7,6 +7,7 @@ import { getAccessToken } from './google/auth';
 import { CalendarClient } from './google/calendar';
 import { DriveClient } from './google/drive';
 import { GmailClient } from './google/gmail';
+import { GoogleWriter } from './google/writer';
 import { Indexer, loadCoverage } from './google/sync';
 import { getRuntime } from './llm/runtime';
 import type { Settings } from './storage/settings';
@@ -34,7 +35,8 @@ export async function buildContainer(settings: Settings): Promise<ContainerResul
   const gmail = new GmailClient(getAccessToken);
   const drive = new DriveClient(getAccessToken);
   const calendar = new CalendarClient(getAccessToken);
-  const services: Services = { mail: gmail, docs: drive, calendar };
+  // Writes run only after the user approves a proposed action (see src/core/actions.ts).
+  const services: Services = { mail: gmail, docs: drive, calendar, write: new GoogleWriter(getAccessToken) };
 
   const retriever = new HybridRetriever({
     index: vectorIndex,
