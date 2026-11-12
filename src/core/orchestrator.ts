@@ -13,7 +13,9 @@ import { systemClock } from './types';
 import type { Coverage } from './watermark';
 
 export interface AgentEvent {
-  type: 'node' | 'route' | 'retrieval' | 'step';
+  type: 'node' | 'route' | 'retrieval' | 'step' | 'partial';
+  /** For 'partial': the answer streamed so far ('' clears it). */
+  text?: string;
   node?: string;
   route?: RouteDecision;
   retrieval?: RetrievalTraceEntry[];
@@ -59,6 +61,7 @@ export class Agent {
   readonly graph: AgentGraph;
   private clock: Clock;
   private listeners = new Map<string, (step: TraceStep) => void>();
+  private partialListeners = new Map<string, (text: string) => void>();
   /** Conversation memory; present when the agent has a key-value store. */
   readonly conversations: ConversationStore | null;
   /** Folding old turns into the summary runs after an answer is returned; the next turn waits for it. */
@@ -76,6 +79,7 @@ export class Agent {
         now: () => this.clock.now(),
         maxSteps: deps.maxSteps,
         onStep: (threadId, step) => this.listeners.get(threadId)?.(step),
+        onPartial: (threadId, text) => this.partialListeners.get(threadId)?.(text),
       },
       deps.checkpointer,
     );
@@ -130,6 +134,7 @@ export class Agent {
     let last: Partial<AgentStateType> = {};
 
     this.listeners.set(threadId, (step) => onEvent?.({ type: 'step', step }));
+    this.partialListeners.set(threadId, (text) => onEvent?.({ type: 'partial', text }));
     try {
       // 'updates' says which node just ran; 'values' carries the full state after it.
       const stream = await this.graph.stream({ question, history }, { ...config, streamMode: ['updates', 'values'] });
@@ -149,6 +154,7 @@ export class Agent {
       }
     } finally {
       this.listeners.delete(threadId);
+      this.partialListeners.delete(threadId);
     }
     await this.rememberThread(threadId);
 

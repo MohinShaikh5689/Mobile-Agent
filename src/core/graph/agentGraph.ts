@@ -80,11 +80,18 @@ export interface GraphDeps {
   maxSteps?: number;
   /** Live tool-call events for the UI, keyed by thread id. */
   onStep?: (threadId: string, step: TraceStep) => void;
+  /** The final answer as it streams in (the text so far), keyed by thread id. */
+  onPartial?: (threadId: string, text: string) => void;
 }
 
 /** The grader may rewrite the query this many times before answering with what it has. */
 export const MAX_REWRITES = 1;
 export const MAX_PLAN_STEPS = 3;
+
+/** How answers are written. The app renders a Markdown subset (no tables). */
+const FORMAT_RULE =
+  'Format the answer in Markdown: short paragraphs, "-" bullet lists for several items, **bold** for names, dates ' +
+  'and times. No tables, and no headings for short answers.';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const SERVICE_NAME: Record<Source, string> = { mail: 'Gmail', docs: 'Google Drive', calendar: 'Google Calendar' };
@@ -113,6 +120,7 @@ function threadId(config: LangGraphRunnableConfig): string {
 
 export function buildAgentGraph(deps: GraphDeps, checkpointer?: BaseCheckpointSaver) {
   const stepper = (config: LangGraphRunnableConfig) => (s: TraceStep) => deps.onStep?.(threadId(config), s);
+  const streamer = (config: LangGraphRunnableConfig) => (text: string) => deps.onPartial?.(threadId(config), text);
 
   /**
    * Follow-ups ("what did she say after that?") are rewritten as standalone questions using the
@@ -167,13 +175,14 @@ export function buildAgentGraph(deps: GraphDeps, checkpointer?: BaseCheckpointSa
       system:
         `You answer questions about the user's ${SERVICE_NAME[source]}. ${dateContext(deps.now())}${windowHint(state.route)} ` +
         'You have read access through the tools. Use them to look things up; never guess, and never say you lack access. ' +
-        'Answer in a few short sentences or a short list, with dates and names.',
+        `Answer in a few short sentences or a short list, with dates and names. ${FORMAT_RULE}`,
       user: userPrompt(state),
       tools: specialistTools(source, deps.services),
       maxSteps: deps.maxSteps,
       // Exact lookups need data: never let the model answer before it has looked.
       requireToolFirst: true,
       onStep: stepper(config),
+      onPartial: streamer(config),
     });
     return { answer: res.answer, steps: res.steps };
   }
@@ -208,11 +217,13 @@ export function buildAgentGraph(deps: GraphDeps, checkpointer?: BaseCheckpointSa
         system:
           `You answer questions about the user's Google Calendar. ${dateContext(now)} ` +
           `Below are the user's events from ${args.start} to ${args.end}, fetched from their calendar. Answer from them ` +
-          'in a short list with day, time and title. Call read_event only if the user asks about one event\'s details.',
+          'in a short list with day, time and title. Call read_event only if the user asks about one event\'s details. ' +
+          FORMAT_RULE,
         user: `${asData('calendar events', listing)}\n\n${userPrompt(state)}`,
         tools: [calendarTools(deps.services).read],
         maxSteps: Math.min(deps.maxSteps ?? 5, 3),
         onStep,
+        onPartial: streamer(config),
       });
       return { answer: res.answer, steps: [step, ...res.steps] };
     } catch (e) {
@@ -310,12 +321,13 @@ export function buildAgentGraph(deps: GraphDeps, checkpointer?: BaseCheckpointSa
       model: deps.model,
       system:
         `You answer from search results over the user's email and documents. ${dateContext(deps.now())} ` +
-        'Use only the results given. If they do not answer the question, say so. Cite results like [1]. ' +
+        `Use only the results given. If they do not answer the question, say so. Cite results like [1]. ${FORMAT_RULE} ` +
         'Call a read tool only when you need the full text of one result to quote it exactly.',
       user: `${asData('search results', context)}\n\n${userPrompt(state)}`,
       tools: readTools(r.services, deps.services),
       maxSteps: Math.min(deps.maxSteps ?? 5, 3),
       onStep: stepper(config),
+      onPartial: streamer(config),
     });
     return { answer: res.answer, steps: res.steps };
   }
@@ -397,17 +409,21 @@ export function buildAgentGraph(deps: GraphDeps, checkpointer?: BaseCheckpointSa
     return state.stepIndex < state.plan.length ? 'run_step' : 'compose';
   }
 
-  async function compose(state: AgentStateType): Promise<Update> {
-    const res = await deps.model.chat([
+  async function compose(state: AgentStateType, config: LangGraphRunnableConfig): Promise<Update> {
+    const res = await deps.model.chat(
+      [
       {
         role: 'system',
         content:
           `${dateContext(deps.now())} Combine the findings below into one short answer to the user's request. ` +
           'If the request asks to send, draft, invite or change anything, say what you would propose, and that ' +
-          'write actions need the approval step that is not built yet.',
+          `write actions need the approval step that is not built yet. ${FORMAT_RULE}`,
       },
       { role: 'user', content: `${asData('findings', state.findings.join('\n\n'))}\n\n${userPrompt(state)}` },
-    ]);
+      ],
+      undefined,
+      { onPartial: streamer(config) },
+    );
     return { answer: res.content };
   }
 

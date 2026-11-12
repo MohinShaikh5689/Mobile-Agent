@@ -33,6 +33,11 @@ export interface ChatResult {
 export interface ChatOptions {
   /** 'required' makes the model call one of the tools instead of answering in text. */
   toolChoice?: 'auto' | 'required';
+  /**
+   * Streaming: called with the visible answer so far (not a delta) as tokens arrive. Never called
+   * with tool-call text; called with '' when the turn turns out to be a tool call.
+   */
+  onPartial?: (text: string) => void;
 }
 
 export interface ChatModel {
@@ -54,9 +59,9 @@ export interface Embedder {
   embed(texts: string[], kind?: EmbedKind): Promise<number[][]>;
 }
 
-/** Small models often emit <think> blocks; they are never part of the answer. */
+/** Small models often emit <think> blocks; they are never part of the answer. An unclosed one (mid-stream) is dropped too. */
 export function stripThinking(text: string): string {
-  return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+  return text.replace(/<think>[\s\S]*?(<\/think>|$)/g, '').trim();
 }
 
 /** Pulls the first JSON object out of model text (fallback when the backend cannot constrain output). */

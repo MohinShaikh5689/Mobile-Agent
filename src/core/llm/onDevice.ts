@@ -8,8 +8,16 @@ import { parseJsonObject, stripThinking } from './types';
  */
 
 /** The slice of llama.rn's LlamaContext this backend uses. */
+/** What llama.rn reports for each generated token. `content` is the parsed answer so far. */
+export interface TokenEvent {
+  token?: string;
+  content?: string;
+  accumulated_text?: string;
+  tool_calls?: unknown[];
+}
+
 export interface LlamaLike {
-  completion(params: Record<string, unknown>): Promise<{
+  completion(params: Record<string, unknown>, onToken?: (data: TokenEvent) => void): Promise<{
     text: string;
     content?: string;
     tool_calls?: { type?: string; id?: string; function: { name: string; arguments: string } }[];
@@ -61,6 +69,36 @@ export function toOaiMessages(messages: ChatMessage[]): Record<string, unknown>[
     }
     return { role: m.role, content: m.content };
   });
+}
+
+/**
+ * Turns llama.rn token events into "visible answer so far". Prefers the parsed `content` (tool
+ * calls and reasoning already removed); falls back to the raw text when a template gives none,
+ * holding back anything that looks like a tool call.
+ */
+export function partialReporter(onPartial: (text: string) => void): (data: TokenEvent) => void {
+  let last = '';
+  let toolTurn = false;
+  return (data) => {
+    if (toolTurn) return;
+    if (data.tool_calls?.length) {
+      toolTurn = true;
+      if (last) onPartial('');
+      last = '';
+      return;
+    }
+    let text = data.content;
+    if (text === undefined) {
+      const raw = data.accumulated_text ?? '';
+      if (/<tool_call>|^\s*[{[]/.test(raw)) return;
+      text = raw;
+    }
+    text = stripThinking(text);
+    if (text !== last) {
+      last = text;
+      onPartial(text);
+    }
+  };
 }
 
 function parseArgs(raw: string): Record<string, unknown> {
@@ -159,6 +197,7 @@ export class OnDeviceModel implements ChatModel, Embedder {
 
   async chat(messages: ChatMessage[], tools?: ToolSpec[], opts?: ChatOptions): Promise<ChatResult> {
     const ctx = await this.chatContext();
+    const onToken = opts?.onPartial ? partialReporter(opts.onPartial) : undefined;
     const res = await this.chatQueue.run(() =>
       ctx.completion({
         messages: toOaiMessages(messages),
@@ -175,7 +214,7 @@ export class OnDeviceModel implements ChatModel, Embedder {
         n_predict: this.cfg.maxTokens ?? 1024,
         // Hybrid-thinking models (Qwen3) answer directly; the graph does the planning.
         chat_template_kwargs: { enable_thinking: false },
-      }),
+      }, onToken),
     );
     const toolCalls: ToolCall[] = (res.tool_calls ?? []).map((c) => ({
       name: c.function.name,

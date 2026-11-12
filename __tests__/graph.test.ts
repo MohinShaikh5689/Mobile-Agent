@@ -259,3 +259,21 @@ describe('DurableCheckpointSaver', () => {
     expect(JSON.parse(kv.data.get('agent.threads') as string)).toEqual(ids.slice(1));
   });
 });
+
+describe('streaming through the graph', () => {
+  it('streams the final answer as partial events', async () => {
+    const model: ChatModel = {
+      async chat(_m, _tools, opts) {
+        opts?.onPartial?.('- **09:30**');
+        opts?.onPartial?.('- **09:30** Standup');
+        return { content: '- **09:30** Standup', toolCalls: [] };
+      },
+    };
+    const partials: string[] = [];
+    const r = await makeAgent(model).ask("What's on my calendar tomorrow?", (e) => {
+      if (e.type === 'partial') partials.push(e.text ?? '');
+    });
+    expect(partials).toEqual(['- **09:30**', '- **09:30** Standup']);
+    expect(r.answer).toBe('- **09:30** Standup');
+  });
+});

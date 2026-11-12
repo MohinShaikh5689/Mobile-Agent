@@ -17,6 +17,7 @@ import type { RetrievalTraceEntry } from '../core/retriever';
 import type { Route } from '../core/router';
 import { isoDate } from '../core/specialists';
 import type { Agent } from '../core/orchestrator';
+import { Markdown } from './Markdown';
 import type { Theme } from './theme';
 import { useTheme } from './theme';
 
@@ -133,6 +134,24 @@ export function ChatScreen({ agent, unavailable, loadStatus }: {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
+  /** The answer as it streams in. Updates are batched (about 15 a second) to keep scrolling smooth. */
+  const [draft, setDraft] = useState('');
+  const draftRef = useRef('');
+  const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pushDraft = useCallback((text: string) => {
+    draftRef.current = text;
+    if (draftTimer.current) return;
+    draftTimer.current = setTimeout(() => {
+      draftTimer.current = null;
+      setDraft(draftRef.current);
+    }, 66);
+  }, []);
+  const clearDraft = useCallback(() => {
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    draftTimer.current = null;
+    draftRef.current = '';
+    setDraft('');
+  }, []);
   const listRef = useRef<FlatList<Message>>(null);
 
   // Show the open conversation again after a restart (details of old answers are not kept).
@@ -180,17 +199,22 @@ export function ChatScreen({ agent, unavailable, loadStatus }: {
           if (e.type === 'route' && e.route) setStatus(`${ROUTE_LABEL[e.route.route]}…`);
           if (e.type === 'node' && e.node && NODE_STATUS[e.node]) setStatus(NODE_STATUS[e.node] as string);
           if (e.type === 'step' && e.step?.kind === 'tool') setStatus(`Calling ${e.step.name}…`);
+          if (e.type === 'partial') {
+            pushDraft(e.text ?? '');
+            if (e.text) setStatus('Writing…');
+          }
         });
         setMessages((m) => [...m, { id: `${Date.now()}a`, role: 'agent', text: result.answer, result }]);
       } catch (e) {
         setMessages((m) => [...m, { id: `${Date.now()}e`, role: 'error', text: (e as Error).message }]);
       } finally {
+        clearDraft();
         setBusy(false);
         setStatus('');
         setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
       }
     },
-    [agent, busy, unavailable],
+    [agent, busy, unavailable, pushDraft, clearDraft],
   );
 
   return (
@@ -233,6 +257,13 @@ export function ChatScreen({ agent, unavailable, loadStatus }: {
               ))}
           </View>
         }
+        ListFooterComponent={
+          busy && draft ? (
+            <View style={[styles.bubble, { marginTop: 12, backgroundColor: t.surface, borderColor: t.border, borderWidth: 1 }]}>
+              <Markdown text={`${draft} ▍`} t={t} />
+            </View>
+          ) : undefined
+        }
         renderItem={({ item }) => (
           <View
             style={[
@@ -242,9 +273,13 @@ export function ChatScreen({ agent, unavailable, loadStatus }: {
                 : { alignSelf: 'stretch', backgroundColor: t.surface, borderColor: t.border, borderWidth: 1 },
             ]}
           >
-            <Text style={{ color: item.role === 'error' ? t.error : t.text, fontSize: 15, lineHeight: 21 }} selectable>
-              {item.text}
-            </Text>
+            {item.role === 'agent' ? (
+              <Markdown text={item.text} t={t} />
+            ) : (
+              <Text style={{ color: item.role === 'error' ? t.error : t.text, fontSize: 15, lineHeight: 21 }} selectable>
+                {item.text}
+              </Text>
+            )}
             {item.result && <Details result={item.result} t={t} />}
           </View>
         )}

@@ -67,6 +67,8 @@ export interface LoopOptions {
    * answers "I don't have access to your calendar" without trying.
    */
   requireToolFirst?: boolean;
+  /** Streams the answer as it is generated (see ChatOptions.onPartial). */
+  onPartial?: (text: string) => void;
   onStep?: (step: TraceStep) => void;
 }
 
@@ -93,7 +95,9 @@ export async function runToolLoop(opts: LoopOptions): Promise<LoopResult> {
 
   for (let step = 0; step < maxSteps; step++) {
     const toolChoice = step === 0 && opts.requireToolFirst && specs.length ? 'required' : 'auto';
-    const res = await opts.model.chat(messages, specs.length ? specs : undefined, { toolChoice });
+    const res = await opts.model.chat(messages, specs.length ? specs : undefined, { toolChoice, onPartial: opts.onPartial });
+    // A tool-call turn is not the answer: clear anything that was streamed for it.
+    if (res.toolCalls.length) opts.onPartial?.('');
     record({ kind: 'model', content: res.content, toolCalls: res.toolCalls });
 
     if (res.toolCalls.length === 0) {
@@ -122,7 +126,7 @@ export async function runToolLoop(opts: LoopOptions): Promise<LoopResult> {
     role: 'user',
     content: 'Stop calling tools. Answer now from the results above, and say plainly if something is missing.',
   });
-  const final = await opts.model.chat(messages);
+  const final = await opts.model.chat(messages, undefined, { onPartial: opts.onPartial });
   record({ kind: 'model', content: final.content, toolCalls: [] });
   return { answer: final.content || 'I ran out of steps before finding an answer.', steps, hitStepLimit: true };
 }
