@@ -277,3 +277,51 @@ describe('streaming through the graph', () => {
     expect(r.answer).toBe('- **09:30** Standup');
   });
 });
+
+describe('general conversation in the graph', () => {
+  it('answers small talk directly, with no search or tools', async () => {
+    const { model, seen, jsonSeen } = scripted([{ content: 'Hi! How can I help?', toolCalls: [] }]);
+    const r = await makeAgent(model).ask('hi');
+    expect(r.path).toEqual(['contextualize', 'router', 'chat']);
+    expect(r.route.route).toBe('general');
+    expect(seen[0]?.tools).toBeUndefined();
+    expect(jsonSeen).toHaveLength(0);
+    expect(r.answer).toBe('Hi! How can I help?');
+  });
+
+  it('asks the classifier when unsure, then chats for a general question', async () => {
+    const live: string[][] = [];
+    const { model, jsonSeen } = scripted([{ content: 'A VPN encrypts your traffic…', toolCalls: [] }], [{ about_user_data: false }]);
+    const r = await makeAgent(model, {}, live).ask('explain how a VPN works');
+    expect(r.path).toEqual(['contextualize', 'router', 'classify', 'chat']);
+    expect(r.route.route).toBe('general');
+    expect(live).toHaveLength(0); // nothing searched
+    expect(jsonSeen[0]?.[1]?.content).toContain('explain how a VPN works');
+  });
+
+  it('asks the classifier when unsure, then searches for a question about the user', async () => {
+    const { model } = scripted([{ content: 'The vendor said… [1]', toolCalls: [] }], [{ about_user_data: true }, { relevant: true }]);
+    const r = await makeAgent(model).ask('what the vendor said about pricing');
+    expect(r.path).toEqual(['contextualize', 'router', 'classify', 'retrieve', 'grade', 'respond']);
+    expect(r.route.route).toBe('fuzzy');
+  });
+
+  it('falls back to searching if the classifier fails', async () => {
+    const { model } = scripted([{ content: 'ok', toolCalls: [] }], []); // chatJson throws: no scripted JSON
+    const r = await makeAgent(model).ask('where does pasta come from');
+    expect(r.path.slice(0, 4)).toEqual(['contextualize', 'router', 'classify', 'retrieve']);
+  });
+
+  it('streams general answers', async () => {
+    const model: ChatModel = {
+      async chat(_m, _t, opts) {
+        opts?.onPartial?.('Hel');
+        opts?.onPartial?.('Hello!');
+        return { content: 'Hello!', toolCalls: [] };
+      },
+    };
+    const partials: string[] = [];
+    await makeAgent(model).ask('hello', (e) => e.type === 'partial' && partials.push(e.text ?? ''));
+    expect(partials).toEqual(['Hel', 'Hello!']);
+  });
+});

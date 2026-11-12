@@ -33,10 +33,12 @@ const ROUTE_LABEL: Record<Route, string> = {
   fuzzy: 'Recall (index + live)',
   multi_step: 'Multi-step',
   action: 'Action',
+  general: 'Chat',
 };
 
 /** What the user sees while each graph node's successor runs. */
 const NODE_STATUS: Record<string, string> = {
+  classify: 'Thinking…',
   retrieve: 'Checking the results…',
   grade: 'Writing the answer…',
   rewrite: 'Searching again with a better query…',
@@ -48,7 +50,7 @@ const EXAMPLES = [
   "What's on my calendar tomorrow?",
   'Any unread mail from today?',
   'Find the thread about the visa paperwork',
-  'What did the vendor say about pricing?',
+  'Explain how a VPN works, simply'
 ];
 
 function windowText(w: { start?: number; end?: number } | null): string {
@@ -243,7 +245,7 @@ export function ChatScreen({ agent, unavailable, loadStatus }: {
           <View style={{ flex: 1, justifyContent: 'center', gap: 10 }}>
             <Text style={{ color: t.text, fontSize: 20, fontWeight: '600' }}>Ask about your mail, docs and calendar</Text>
             <Text style={{ color: t.muted }}>
-              {agent ? 'Runs on this phone. Read-only for now. Try one of these:' : unavailable}
+              {agent ? 'Runs on this phone. Ask about your mail, docs and calendar, or anything else. Try:' : unavailable}
             </Text>
             {agent &&
               EXAMPLES.map((ex) => (

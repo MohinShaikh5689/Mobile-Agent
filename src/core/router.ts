@@ -8,8 +8,12 @@ import type { Source, TimeWindow } from './types';
  * - fuzzy:      recall by meaning, answered from the hybrid index + live retrieval
  * - multi_step: spans services or chains steps; goes to the planner
  * - action:     asks for a write (draft, send, invite); needs the approval gate
+ * - general:    small talk or a general question; answered by the model, no search
+ *
+ * When the rules cannot tell a general question from one about the user's data, the decision
+ * says `ambiguous` and the graph asks the model a yes/no question (the "tiny classifier").
  */
-export type Route = 'structured' | 'fuzzy' | 'multi_step' | 'action';
+export type Route = 'structured' | 'fuzzy' | 'multi_step' | 'action' | 'general';
 
 export interface RouteDecision {
   route: Route;
@@ -21,6 +25,8 @@ export interface RouteDecision {
   keywords: string[];
   /** Why this route was chosen, for tracing. */
   reason: string;
+  /** Rules could not tell general from personal; the graph's classify step decides. */
+  ambiguous?: boolean;
 }
 
 const SERVICE_PATTERNS: Record<Source, RegExp> = {
@@ -51,6 +57,14 @@ const STRUCTURED_PATTERN = new RegExp(
 /** Recall-by-meaning phrasing. */
 const FUZZY_PATTERN =
   /\b(about|regarding|mention(?:ed|s)?|the (?:thread|email|doc|document|file|one) (?:about|with|where|that)|find the|what did .+ say|said about|related to|something about)\b/;
+
+/** Greetings, thanks and questions about the assistant itself. */
+const SMALLTALK =
+  /^\s*(hi|hello|hey|hiya|yo|sup|good (morning|afternoon|evening|night)|thanks|thank you|thx|ty|ok|okay|cool|nice|great|awesome|bye|goodbye|see you|how are you|how's it going|how is it going|what's up|whats up|who are you|what are you|what can you do|help)\b/;
+
+/** Words that tie a request to the user's own data. */
+const PERSONAL =
+  /\b(my|me|mine|i|i'm|i've|i'd|i'll|we|our|us|unread|starred|inbox|received|got any)\b|\b(did|has|have)\s+\S+\s+(say|said|send|sent|write|wrote|reply|replied|email|emailed|share|shared)\b/;
 
 const CHAIN_PATTERN = /\b(and then|then|after that|and (?:also )?(?:draft|send|email|tell|notify|invite))\b/;
 
@@ -114,6 +128,24 @@ export function routeRequest(text: string, now: number): RouteDecision {
 
   const fuzzy = FUZZY_PATTERN.test(q);
   const structured = STRUCTURED_PATTERN.test(q);
+
+  if (services.length === 0) {
+    const words = q.split(/\s+/).filter(Boolean).length;
+    if (SMALLTALK.test(q) && words <= 8) {
+      return { route: 'general', services: [], ...base, reason: 'small talk' };
+    }
+    // Without a service word or a personal cue ("my", "did Sam send"), the patterns below are too
+    // broad ("list some books", "where does pasta come from"): let the classifier decide.
+    if (!PERSONAL.test(q)) {
+      return {
+        route: 'fuzzy',
+        services: ['mail', 'docs'],
+        ...base,
+        ambiguous: true,
+        reason: 'no service or personal cue; classifier decides between general and recall',
+      };
+    }
+  }
 
   if (structured && !fuzzy) {
     if (services.length === 0) services = ['mail'];

@@ -67,3 +67,28 @@ describe('extractKeywords', () => {
     ]);
   });
 });
+
+describe('general conversation', () => {
+  it.each(['hi', 'Hello!', 'thanks', 'how are you?', 'what can you do?', 'good morning'])('%s → general', (q) => {
+    const r = routeRequest(q, NOW);
+    expect(r.route).toBe('general');
+    expect(r.ambiguous).toBeFalsy();
+  });
+
+  it.each(['explain how a VPN works', 'list some good books about habits', 'where does pasta come from', 'what is the capital of France'])(
+    '%s → unsure, for the classifier',
+    (q) => {
+      expect(routeRequest(q, NOW).ambiguous).toBe(true);
+    },
+  );
+
+  it.each([
+    "What's on my calendar tomorrow?",
+    'Any unread mail from Sam?',
+    'did the landlord send the lease',
+    'find the contract with the 30-day notice',
+    'what did Priya say about my visa',
+  ])('%s → not sent to the classifier', (q) => {
+    expect(routeRequest(q, NOW).ambiguous).toBeFalsy();
+  });
+});

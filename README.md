@@ -13,6 +13,10 @@ What is built:
 - **Tool loop:** has a step limit and an error path for every tool error. Untrusted content is always wrapped as data.
 - **Write actions are not built yet.** Requests to draft, send or invite get an explanation instead of an action.
 
+## General conversation
+
+Not everything is about your data. Greetings and small talk go straight to the model; so do general questions ("explain how a VPN works"). When the rules cannot tell whether a message is about your mail, docs or calendar, a `classify` step asks the model one yes/no question and routes it to a search or to plain chat. General answers use the conversation history and stream like the rest, with no search or tools. The model has no web access, and says so for recent news.
+
 ## Conversation memory
 
 The assistant remembers the open conversation, across app restarts, until you tap **New chat**. It fits any context size:

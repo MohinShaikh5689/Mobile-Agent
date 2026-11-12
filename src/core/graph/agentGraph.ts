@@ -24,7 +24,9 @@ import type { Coverage } from '../watermark';
  *           ├─ fuzzy ──────► retrieve ─► grade ─┬─ relevant ─► respond ─► END
  *           │                    ▲              └─ rewrite ──┘ (once)
  *           ├─ multi_step ─► planner ─► run_step ⟲ (one per plan step) ─► compose ─► END
- *           └─ action ─────► action ────────────────────────────────────► END
+ *           ├─ action ─────► action ────────────────────────────────────► END
+ *           ├─ general ────► chat (the model answers directly, streamed) ──► END
+ *           └─ unsure ─────► classify (yes/no: about the user's data?) ──► retrieve | chat
  *
  * Node names differ from state keys (router/route, planner/plan, respond/answer): LangGraph forbids sharing.
  *
@@ -431,6 +433,75 @@ export function buildAgentGraph(deps: GraphDeps, checkpointer?: BaseCheckpointSa
     return { answer: WRITE_NOT_YET };
   }
 
+  /**
+   * The "tiny classifier": only for messages the rules could not place. One yes/no question:
+   * is this about the user's own mail, documents or calendar, or a general question?
+   */
+  async function classify(state: AgentStateType): Promise<Update> {
+    const r = state.route as RouteDecision;
+    try {
+      const out = (await askJson(
+        deps.model,
+        [
+          {
+            role: 'system',
+            content:
+              "Decide whether the user's message needs their own Gmail, Google Drive or Google Calendar " +
+              '(their emails, documents, meetings, contacts) or is a general message: small talk, general ' +
+              'knowledge, advice, writing or explaining something. Use the conversation to decide.',
+          },
+          {
+            role: 'user',
+            content: `${state.history ? `${asData('conversation so far', state.history)}\n\n` : ''}Message: ${state.standalone}`,
+          },
+        ],
+        { type: 'object', properties: { about_user_data: { type: 'boolean' } }, required: ['about_user_data'] },
+      )) as { about_user_data?: unknown };
+      const personal = out.about_user_data === true || out.about_user_data === 'true';
+      return {
+        route: personal
+          ? { ...r, ambiguous: false, reason: `${r.reason} → classifier: about the user's data` }
+          : { ...r, route: 'general', services: [], ambiguous: false, reason: `${r.reason} → classifier: general` },
+      };
+    } catch (e) {
+      // Searching costs little and may still help; keep the recall route.
+      return {
+        route: { ...r, ambiguous: false },
+        steps: [{ kind: 'note', message: `classifier failed, searching instead: ${(e as Error).message}` }],
+      };
+    }
+  }
+
+  /** General conversation: the model answers directly with the conversation, no search or tools. */
+  async function chat(state: AgentStateType, config: LangGraphRunnableConfig): Promise<Update> {
+    const res = await deps.model.chat(
+      [
+        {
+          role: 'system',
+          content:
+            `You are a helpful assistant running on the user's phone. ${dateContext(deps.now())} ` +
+            'Chat naturally and answer general questions from your own knowledge; be concise. You cannot browse ' +
+            'the web: say so if asked about recent news, and note when facts may be out of date. You can also ' +
+            "search and read the user's Gmail, Google Drive and Google Calendar when they ask about them. " +
+            FORMAT_RULE,
+        },
+        { role: 'user', content: userPrompt(state) },
+      ],
+      undefined,
+      { onPartial: streamer(config) },
+    );
+    return { answer: res.content || 'Sorry, I could not come up with an answer.' };
+  }
+
+  const ROUTE_NODE = {
+    structured: 'specialist',
+    fuzzy: 'retrieve',
+    multi_step: 'planner',
+    action: 'action',
+    general: 'chat',
+  } as const;
+  const dispatch = (s: AgentStateType) => ROUTE_NODE[(s.route as RouteDecision).route];
+
   const graph = new StateGraph(AgentState)
     .addNode('contextualize', contextualize)
     .addNode('router', route)
@@ -443,16 +514,17 @@ export function buildAgentGraph(deps: GraphDeps, checkpointer?: BaseCheckpointSa
     .addNode('run_step', runStep)
     .addNode('compose', compose)
     .addNode('action', action)
+    .addNode('classify', classify)
+    .addNode('chat', chat)
     .addEdge(START, 'contextualize')
     .addEdge('contextualize', 'router')
     .addConditionalEdges(
       'router',
-      (s: AgentStateType) =>
-        ({ structured: 'specialist', fuzzy: 'retrieve', multi_step: 'planner', action: 'action' } as const)[
-          (s.route as RouteDecision).route
-        ],
-      ['specialist', 'retrieve', 'planner', 'action'],
+      (s: AgentStateType) => ((s.route as RouteDecision).ambiguous ? 'classify' : dispatch(s)),
+      ['classify', 'specialist', 'retrieve', 'planner', 'action', 'chat'],
     )
+    .addConditionalEdges('classify', dispatch, ['retrieve', 'chat'])
+    .addEdge('chat', END)
     .addEdge('specialist', END)
     .addEdge('retrieve', 'grade')
     .addConditionalEdges('grade', (s: AgentStateType) => (afterGrade(s) === 'retrieve' ? 'rewrite' : 'respond'), [
